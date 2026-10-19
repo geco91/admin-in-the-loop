@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.9.16 — Sperrgrund für „Prüfen“ sichtbar machen
+
+- Reproduziert: Bridge/Tunnel verbunden und Vorschlag vorhanden, aber noch keine
+  lokale Terminalsitzung. Die bestehende Sitzungsbindung sperrt dann „Prüfen“;
+  v0.9.15 zeigte dafür keinen Hinweis beim Vorschlag an.
+- Der Vorschlagsstatus nennt jetzt den nächsten Schritt: Terminal links öffnen,
+  Terminalstart abwarten, aktiven Commandreview freigeben/verwerfen oder laufende
+  Übernahme/Übertragung abschließen. Ein geparkter Vorschlag wird als solcher
+  angezeigt. Grün bedeutet prüfbar; gesperrte Vorschläge sind orange markiert.
+- Review-, Übernahme- und Freigabesperren bleiben bestehen. Das Öffnen eines
+  Terminals oder eines Reviews führt keinen vorgeschlagenen Command aus.
+
+Gezielte Prüfung und Grenzen: [v0.9.16](doc/RELEASE_V0.9.16.md).
+
 ## 0.9.15 — Einzeldatei-Download und ausdrückliches Selbstupdate
 
 - `update` bzw. `--update` ohne Zusatz verwendet GeektankLabs/admin-in-the-loop,

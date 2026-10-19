@@ -1,4 +1,4 @@
-# Admin in the Loop – v0.9.15 (persönliche Testversion)
+# Admin in the Loop – v0.9.16 (persönliche Testversion)
 
 **AI assists, Admin decides.**
 
@@ -8,7 +8,7 @@ Stand des beschriebenen MVP: 30. September 2026. Die bisherige lokale Integratio
 
 ## Versionen und Versionsregel
 
-Kanonische Version: `APP_VERSION` in `admin_in_the_loop.py` (aktuell **0.9.15**); die headless Bridge zeigt dieselbe Version (`BRIDGE_SERVER_INFO`, Konsolen-Startzeile) und der GUI-Fenstertitel führt sie ebenfalls. Jeder neue ausgelieferte Programmstand erhöht mindestens den Patch-Stand (keine undokumentierten Stände); `--version` gibt die Version zeilenweise aus. Tests pinnen die Konsistenz beider Kopien.
+Kanonische Version: `APP_VERSION` in `admin_in_the_loop.py` (aktuell **0.9.16**); die headless Bridge zeigt dieselbe Version (`BRIDGE_SERVER_INFO`, Konsolen-Startzeile) und der GUI-Fenstertitel führt sie ebenfalls. Jeder neue ausgelieferte Programmstand erhöht mindestens den Patch-Stand (keine undokumentierten Stände); `--version` gibt die Version zeilenweise aus. Tests pinnen die Konsistenz beider Kopien.
 
 Einzeldatei-Download und `update [GITHUB_USER [BRANCH]]` stehen im
 [Root-README](../README.md#einfach-aktualisieren). Standard ist GeektankLabs/main;
@@ -64,7 +64,7 @@ Das Controllerfenster startet groß im Querformat. **F11** schaltet Vollbild, **
 - Links Terminalstatus und Ausgabeauswahl; in der Mitte der große Review; rechts AI-/MCP-Verbindung und Vorschlagsstatus. Gerahmte Arbeitsbereiche mit ungefähr **1:2:1** Breitenverhältnis; die Seitenbereiche sind gleich gestaltet, der mittlere Review ist der primäre Arbeitsbereich.
 - „Terminal öffnen“ und „Verbindung einstellen“ stehen oben auf gleicher Höhe. Beide Prüfen-Buttons und Freigeben/Verwerfen stehen unten auf einer gemeinsamen Zeile.
 - Die Prüfauswahl steht unmittelbar über dem jeweiligen Prüfen-Button: links „Rückgabeprüfung“, rechts „Befehlsprüfung“. Zeichenprüfung und Einstellungen sind pro Richtung unabhängig gespeichert; sh-guard steht nur für Befehle bereit. In der Mitte bleiben Code/Ausgabe und die aktivierten, zur Richtung passenden Prüfreiter. [Beispielbilder und Prüfnachweis](../doc/REVIEW_LAYOUT.md).
-- Keine Inhaltsvorschau in den Seitenbereichen. Grün signalisiert einen vorhandenen Vorschlag, Orange einen leeren Platz. Die Farbe bewertet keine Sicherheit. Erst „Prüfen“ übernimmt den Vorschlag in den Review und leert den lokalen Platz.
+- Keine Inhaltsvorschau in den Seitenbereichen. Grün signalisiert einen prüfbaren Vorschlag; Orange einen leeren oder momentan gesperrten Platz. Ein gesperrter Vorschlag bleibt ausdrücklich als vorhanden ausgewiesen, mit Hinweis auf fehlendes/startendes Terminal, aktiven Commandreview oder laufende Übernahme/Übertragung. Die Farbe bewertet keine Sicherheit. Erst „Prüfen“ übernimmt den Vorschlag in den Review und leert den lokalen Platz.
 - Der Review hat weiche Zeilenumbrüche und ausschließlich eine vertikale Scrollbar. Die Umbrüche verändern den übertragenen Text nicht.
 - „Finales Return senden“ erscheint nur bei Commands. Beim ersten Start eingeschaltet, danach persistent nach Benutzerwahl. Interne Zeilenumbrüche können schon ohne finales Return Befehle ausführen; die Oberfläche weist darauf hin.
 - Blockgrößen **SINGLE, SMALL, MEDIUM, LARGE**; persistente Komfortpräferenz, keine Ausführungsberechtigung.

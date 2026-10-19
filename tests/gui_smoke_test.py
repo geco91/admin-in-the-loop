@@ -182,6 +182,75 @@ class ConnectionDialogTests(unittest.TestCase):
             yield child
             yield from self.descendants(child)
 
+    def test_pending_proposal_explains_terminal_gate_even_with_connected_bridge(self):
+        self.core.start_local(self.tmp.name)
+        proposal = self.core.add_proposal("printf 'review only'")
+        bridge = a.replace(self.core.bridge_snapshot(), state="CONNECTED", mode="REMOTE",
+                           target="https://127.0.0.1:8443", tunnel_phase="connected")
+        with mock.patch.object(self.core, "bridge_snapshot", return_value=bridge), \
+                mock.patch.object(self.core, "review_pending_proposal", wraps=self.core.review_pending_proposal) as take:
+            for size in ("960x560", "1360x850"):
+                self.root.geometry(size)
+                for state, reason in (("WAITING_FOR_TERMINAL", "Zuerst links Terminal öffnen"),
+                                      ("STARTING_SHELL", "Terminal verbindet"),
+                                      ("DISCONNECTED", "Terminal getrennt")):
+                    with self.subTest(size=size, state=state):
+                        self.core.connection = state
+                        self.ui.render()
+                        self.root.update()
+                        self.assertIn("Command-Vorschlag vorhanden", self.ui.readiness.cget("text"))
+                        self.assertIn(reason, self.ui.readiness.cget("text"))
+                        self.assertTrue(self.ui.from_ai_button.instate(["disabled"]))
+                        self.ui.from_ai_button.invoke()
+                        self.assertIn(proposal, self.core.inbox)
+                        self.assertIsNone(self.core.review)
+                        self.assertTrue(self.ui.readiness.winfo_viewable())
+                        self.assertGreaterEqual(self.ui.readiness.winfo_height(), self.ui.readiness.winfo_reqheight())
+                        self.assertLessEqual(self.ui.from_ai_button.winfo_rooty()+self.ui.from_ai_button.winfo_height(),
+                                             self.root.winfo_rooty()+self.root.winfo_height())
+            take.assert_not_called()
+            self.core.connection = "STARTING_SHELL"
+            self.core._event({"type": "ready", "session": "12345678-1234-1234-1234-123456789012"})
+            self.ui.render()
+            self.root.update()
+            self.assertTrue(self.ui.from_ai_button.instate(["!disabled"]))
+            self.assertEqual(self.ui.readiness.cget("text"), "Command-Vorschlag vorhanden")
+            self.ui.from_ai_button.invoke()
+            take.assert_called_once()
+            self.assertEqual(self.core.review_state, "REVIEW")
+            self.assertEqual(self.core.review.text, "printf 'review only'\n")
+            self.assertNotIn(proposal, self.core.inbox)
+            self.assertIsNone(self.core.channel)  # No terminal send or approval took place.
+
+    def test_pending_proposal_explains_stage_and_transfer_gates(self):
+        self.core.connection, self.core.session = "CONNECTED", "UI_TEST_SESSION"
+        self.core.review_command("printf 'current review'")
+        proposal = self.core.add_proposal("printf 'next review'")
+        for state, reason in (("REVIEW", "Aktuellen Review freigeben oder verwerfen"),
+                              ("OVERRIDE_REQUIRED", "Aktuellen Review freigeben oder verwerfen"),
+                              ("CHECKING", "Terminalübertragung läuft"),
+                              ("TRANSFERRING", "Terminalübertragung läuft"),
+                              ("TAKE_PENDING", "Übernahme wird bestätigt"),
+                              ("SENDING", "Ausgabe wird zurückgegeben"),
+                              ("DELIVERY_UNCERTAIN", "Zustellung der Ausgabe klären")):
+            with self.subTest(state=state):
+                self.core.review_state = state
+                self.ui.render()
+                self.assertTrue(self.ui.from_ai_button.instate(["disabled"]))
+                self.assertIn(reason, self.ui.readiness.cget("text"))
+                self.assertIn(proposal, self.core.inbox)
+        self.core.review_state = "REVIEW"
+        self.core.review = a.replace(self.core.review, direction="TO_OUTPUT_SINK", final_return=False)
+        self.ui.render()
+        self.assertTrue(self.ui.from_ai_button.instate(["!disabled"]))  # Existing directional dialog stays reachable.
+        self.core.review = a.replace(self.core.review, direction="TO_TERMINAL")
+        self.core._park_staged_proposal()
+        self.core.remove_proposal(proposal)
+        self.ui.render()
+        self.assertTrue(self.ui.from_ai_button.instate(["!disabled"]))
+        self.assertIn("Geparkter Vorschlag vorhanden", self.ui.readiness.cget("text"))
+        self.assertIsNone(self.core.channel)
+
     def test_panel_proportions_and_shared_footer_at_supported_sizes(self):
         for width in (960, 1360):
             self.root.geometry("%dx600" % width)

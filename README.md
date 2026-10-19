@@ -16,7 +16,7 @@ weitergegeben. Das Terminal bleibt unabhängig manuell bedienbar.
 
 ## Aktuelle persönliche Testversion
 
-**Aktuelle persönliche Testversion: v0.9.15 mit Download und ausdrücklichem Selbstupdate.**
+**Aktuelle persönliche Testversion: v0.9.16 mit verständlichen Hinweisen bei gesperrtem „Prüfen“.**
 Links im Terminalbereich wird die Rückgabeprüfung eingestellt, rechts im AI-Bereich
 die Befehlsprüfung. Die Mitte bleibt für Code/Ausgabe und die passenden Prüfreiter
 mit Ampel und Befundzahl frei. [Echte Beispielansichten](doc/REVIEW_LAYOUT.md).
@@ -26,15 +26,15 @@ stehen im [Changelog](CHANGELOG.md).
 
 ## Herunterladen und ausprobieren
 
-[Python-Datei v0.9.15 herunterladen](https://raw.githubusercontent.com/geco91/admin-in-the-loop/refs/tags/v0.9.15/admin_in_the_loop.py) ·
-[Gesamtes Repository als ZIP](https://github.com/geco91/admin-in-the-loop/archive/refs/tags/v0.9.15.zip)
+[Python-Datei v0.9.16 herunterladen](https://raw.githubusercontent.com/geco91/admin-in-the-loop/refs/tags/v0.9.16/admin_in_the_loop.py) ·
+[Gesamtes Repository als ZIP](https://github.com/geco91/admin-in-the-loop/archive/refs/tags/v0.9.16.zip)
 
 Die einzelne Python-Datei genügt für die Anwendung; Tests und Dokumentation
 liegen zusätzlich im ZIP. In einem eigenen, leeren Verzeichnis herunterladen:
 
 ```bash
 curl --fail --location --proto '=https' --tlsv1.2 \
-  https://raw.githubusercontent.com/geco91/admin-in-the-loop/refs/tags/v0.9.15/admin_in_the_loop.py \
+  https://raw.githubusercontent.com/geco91/admin-in-the-loop/refs/tags/v0.9.16/admin_in_the_loop.py \
   --output admin_in_the_loop.py
 python3 admin_in_the_loop.py
 ```
@@ -80,7 +80,20 @@ und Versionsprüfung sind keine Signaturprüfung oder Sicherheitsbewertung des C
 Lokale Änderungen an der Anwendungsdatei werden im Backup gesichert und ersetzt.
 Bei einem Git-Checkout stattdessen den üblichen Git-Workflow verwenden.
 
-[Veröffentlichungsumfang und Prüfnachweis](doc/RELEASE_V0.9.15.md)
+[Veröffentlichungsumfang und Prüfnachweis](doc/RELEASE_V0.9.16.md)
+
+### Vorschlag vorhanden, aber „Prüfen“ ausgegraut?
+
+Die lokale Terminalsitzung muss verbunden sein. Nach einem App-Neustart kann
+die gespeicherte Bridge bereits wieder verbunden sein, während links noch
+„Terminal öffnen“ angeboten wird. Zuerst dieses Terminal öffnen; anschließend
+wird „Prüfen“ freigeschaltet. Ein Vorschlag wird dabei nicht ausgeführt.
+
+Der Vorschlagsstatus nennt ab v0.9.16 den jeweiligen Sperrgrund: fehlendes oder
+startendes Terminal, laufende Übernahme/Übertragung oder ein bereits aktiver
+Commandreview. Einen aktiven Commandreview zuerst freigeben oder verwerfen.
+Eine offene Ausgabeprüfung lässt sich weiterhin über den bestehenden Dialog
+verlassen, um den neuen Vorschlag zu prüfen.
 
 Die Anwendung bleibt ein früher MVP, keine Abnahme für kritische Infrastruktur.
 „Konzept V0.7“, „MVP 0.8“ und der alte v0.0.1-Veröffentlichungsentwurf sind

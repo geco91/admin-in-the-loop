@@ -44,13 +44,13 @@ from types import MappingProxyType
 # Kanonische Version (Journal 8.10.: jede ausgelieferte Codeaenderung erhoehrt
 # mindestens den Patch-Stand). BRIDGE_SERVER_INFO pflegt eine separate Kopie im
 # Bridge-Block; ein Konsistenztest pinnt beide auf denselben Wert.
-APP_VERSION = "0.9.15"
+APP_VERSION = "0.9.16"
 
 
 # Single canonical UI/CLI version. The embedded bridge block keeps its own copy in
 # BRIDGE_SERVER_INFO; a consistency test pins both to the same value (Journal #88ff:
 # every delivered program state bumps at least the patch digit).
-APP_VERSION = "0.9.15"
+APP_VERSION = "0.9.16"
 
 
 def _load_bridge_component(namespace=None):
@@ -9124,14 +9124,30 @@ class ReviewUI:
         proposal_review_active = (snapshot.review is not None
                                   and snapshot.review.direction == "TO_TERMINAL"
                                   and snapshot.review_state in {"REVIEW", "OVERRIDE_REQUIRED"})
-        self.from_ai_button.configure(state="normal" if connected and not busy
-                                      and (snapshot.inbox or self.core.staged_handoff is not None)
-                                      and not proposal_review_active
-                                      else "disabled")
         ready = bool(snapshot.inbox)
-        self.readiness.configure(text="Command-Vorschlag vorhanden" if ready else "Kein Command-Vorschlag",
-                                 background="#dcefe1" if ready else "#f6e4d0",
-                                 foreground="#285739" if ready else "#75451b")
+        parked = self.core.staged_handoff is not None
+        can_review = connected and not busy and (ready or parked) and not proposal_review_active
+        self.from_ai_button.configure(state="normal" if can_review else "disabled")
+        proposal_status = "Command-Vorschlag vorhanden" if ready else (
+            "Geparkter Vorschlag vorhanden" if parked else "Kein Command-Vorschlag")
+        if ready or parked:
+            if not connected:
+                proposal_status += "\n" + {
+                    "WAITING_FOR_TERMINAL": "Zuerst links Terminal öffnen",
+                    "STARTING_SHELL": "Terminal verbindet · bitte warten",
+                    "DISCONNECTED": "Terminal getrennt · links öffnen",
+                }[snapshot.connection]
+            elif busy:
+                proposal_status += "\n" + {
+                    "TAKE_PENDING": "Übernahme wird bestätigt",
+                    "SENDING": "Ausgabe wird zurückgegeben",
+                    "DELIVERY_UNCERTAIN": "Zustellung der Ausgabe klären",
+                }.get(snapshot.review_state, "Terminalübertragung läuft")
+            elif proposal_review_active:
+                proposal_status += "\nAktuellen Review freigeben oder verwerfen"
+        self.readiness.configure(text=proposal_status,
+                                 background="#dcefe1" if can_review else "#f6e4d0",
+                                 foreground="#285739" if can_review else "#75451b")
         modes = [label for key, label in OUTPUT_MODES.items() if key != "SINCE_LAST" or snapshot.last_transfer_offset is not None]
         self.output_picker.configure(values=modes)
         self.output_mode.set(OUTPUT_MODES[snapshot.output_mode])
@@ -9777,7 +9793,7 @@ BRIDGE_RETENTION = 24 * 3600
 BRIDGE_OUTPUT_LIMIT = 64 * 1024
 BRIDGE_BLOCK_SIZES = ("SINGLE", "SMALL", "MEDIUM", "LARGE")
 BRIDGE_VERSIONS = ("2026-07-28", "2025-11-25", "2025-06-18", "2025-03-26")
-BRIDGE_SERVER_INFO = {"name": "admin-in-the-loop", "version": "0.9.15"}
+BRIDGE_SERVER_INFO = {"name": "admin-in-the-loop", "version": "0.9.16"}
 BRIDGE_BASE32 = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 # M9 Folgeaenderung (Operator-Journal 100): pairing-code validity 10 minutes; the
 # attempt limit (5), claim-path cooldown and the separate PAIR_PENDING token lifetime
