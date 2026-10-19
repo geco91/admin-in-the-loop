@@ -44,13 +44,13 @@ from types import MappingProxyType
 # Kanonische Version (Journal 8.10.: jede ausgelieferte Codeaenderung erhoehrt
 # mindestens den Patch-Stand). BRIDGE_SERVER_INFO pflegt eine separate Kopie im
 # Bridge-Block; ein Konsistenztest pinnt beide auf denselben Wert.
-APP_VERSION = "0.9.19"
+APP_VERSION = "0.9.20"
 
 
 # Single canonical UI/CLI version. The embedded bridge block keeps its own copy in
 # BRIDGE_SERVER_INFO; a consistency test pins both to the same value (Journal #88ff:
 # every delivered program state bumps at least the patch digit).
-APP_VERSION = "0.9.19"
+APP_VERSION = "0.9.20"
 
 
 def _load_bridge_component(namespace=None):
@@ -1459,7 +1459,7 @@ class LocalReview:
     id: str
     revision: int
     direction: str
-    session: str
+    session: str | None
     text: str
     payload: bytes
     final_return: bool
@@ -5457,15 +5457,18 @@ class AppCore:
         self.review_state = "EMPTY"
         return self.review_pending_proposal()
 
-    def _new_review(self, direction, text, payload, final_return=False, lost_prefix=False, normalization=None):
+    def _new_review(self, direction, text, payload, final_return=False, lost_prefix=False, normalization=None,
+                    output_source="TERMINAL"):
         require(self.review_state not in {"CHECKING", "TRANSFERRING", "SENDING", "DELIVERY_UNCERTAIN",
                                           "TAKE_PENDING"}, "transfer_in_progress")
-        require(self.session is not None and self.connection == "CONNECTED", "terminal_not_connected")
+        clipboard = direction == "TO_OUTPUT_SINK" and output_source == "CLIPBOARD"
+        require(clipboard or self.session is not None and self.connection == "CONNECTED",
+                "terminal_not_connected")
         self._command_risk.invalidate()
         self.revision += 1
-        self.review = LocalReview(uuid.uuid4().hex, self.revision, direction, self.session,
+        self.review = LocalReview(uuid.uuid4().hex, self.revision, direction, None if clipboard else self.session,
                                   text, payload, final_return, lost_prefix, self._bridge_binding(),
-                                  normalization=normalization)
+                                  normalization=normalization, output_source=output_source)
         self.review_state = "REVIEW"
         return self.review
 
@@ -5562,8 +5565,8 @@ class AppCore:
         # No active or invisible text; LF stays as text, never terminal input.
         require(all(c == "\n" or c == " " or not unicodedata.category(c).startswith(("C", "Z"))
                     for c in text), "output_invisible_character")
-        review = self._new_review("TO_OUTPUT_SINK", text, payload, lost_prefix=lost_prefix)
-        self.review = review = replace(review, output_source=source)
+        review = self._new_review("TO_OUTPUT_SINK", text, payload, lost_prefix=lost_prefix,
+                                  output_source=source)
         if source == "TERMINAL" and self.open_return is not None \
                 and self.open_return["return_state"] in {"offen_sammelnd", "reviewbereit"}:
             self.open_return["return_state"] = "in_stage"  # capture content staged for review
@@ -5571,7 +5574,9 @@ class AppCore:
 
     def _active(self, identifier):
         require(self.review is not None and self.review.id == identifier, "stale_review")
-        require(self.review.session == self.session and self.connection == "CONNECTED", "stale_session")
+        clipboard = self.review.direction == "TO_OUTPUT_SINK" and self.review.output_source == "CLIPBOARD"
+        require(clipboard or self.review.session == self.session and self.connection == "CONNECTED",
+                "stale_session")
         if self.review.bridge_binding:
             require(self.review.bridge_binding == self._bridge_binding(), "stale_bridge_binding")
         if self.review.expires_at is not None:
@@ -5809,7 +5814,9 @@ class AppCore:
             self.review_state = "TRANSFER_UNCERTAIN"
             if self.review is not None and self.review.direction == "TO_TERMINAL":
                 self._record_uncertain_transfer(self.output.end)
-        elif self.review_state in {"REVIEW", "OVERRIDE_REQUIRED"}:
+        elif self.review_state in {"REVIEW", "OVERRIDE_REQUIRED"} and not (
+                self.review and self.review.direction == "TO_OUTPUT_SINK"
+                and self.review.output_source == "CLIPBOARD"):
             self.review_state = "STALE"
 
     def close(self):
@@ -8848,8 +8855,10 @@ class ReviewUI:
         self._render_payload_details(self.core.snapshot())
 
     def _payload_snapshot_current(self, snapshot, review):
-        return (snapshot.review == review and snapshot.session == review.session
-                and snapshot.connection == "CONNECTED" and snapshot.review_state != "STALE"
+        clipboard = review.direction == "TO_OUTPUT_SINK" and review.output_source == "CLIPBOARD"
+        return (snapshot.review == review
+                and (clipboard or snapshot.session == review.session and snapshot.connection == "CONNECTED")
+                and snapshot.review_state != "STALE"
                 and (not review.bridge_binding or review.bridge_binding == self.core._bridge_binding())
                 and (review.expires_at is None or review.expires_at > time.time()))
 
@@ -9157,7 +9166,8 @@ class ReviewUI:
         else:
             self.chat_code_status_label.pack_forget()
         self.chat_code_copy.configure(state="normal" if can_copy else "disabled")
-        self.from_terminal_button.configure(state="normal" if connected and not busy else "disabled")
+        can_select_output = connected or snapshot.output_mode == "CLIPBOARD"
+        self.from_terminal_button.configure(state="normal" if can_select_output and not busy else "disabled")
         # #35: a deliberately requested takeover must open the directional dialog instead of
         # being silently deactivated – only an active PROPOSAL review bars the button outright.
         proposal_review_active = (snapshot.review is not None
@@ -9833,7 +9843,7 @@ BRIDGE_RETENTION = 24 * 3600
 BRIDGE_OUTPUT_LIMIT = 64 * 1024
 BRIDGE_BLOCK_SIZES = ("SINGLE", "SMALL", "MEDIUM", "LARGE")
 BRIDGE_VERSIONS = ("2026-07-28", "2025-11-25", "2025-06-18", "2025-03-26")
-BRIDGE_SERVER_INFO = {"name": "admin-in-the-loop", "version": "0.9.19"}
+BRIDGE_SERVER_INFO = {"name": "admin-in-the-loop", "version": "0.9.20"}
 BRIDGE_BASE32 = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 # M9 Folgeaenderung (Operator-Journal 100): pairing-code validity 10 minutes; the
 # attempt limit (5), claim-path cooldown and the separate PAIR_PENDING token lifetime
@@ -11780,7 +11790,11 @@ class BridgeTunnel:
                 valid_success = observed.tzinfo is not None and -30 <= self.wall_now() - observed.timestamp() <= self.HEALTH_MAX_AGE
             except (ValueError, OverflowError):
                 pass
-        accepted = (value.get("status") == "ok" and valid_success and type(status) is int and 200 <= status < 300
+        # Official v0.0.15 PollHealth.Succeeded clears httpStatus to zero; Go's
+        # omitempty then omits it. It describes a failure, not a mandatory success code.
+        success_status = "http_status" not in details or type(status) is int and 200 <= status < 300
+        accepted = (value.get("status") == "ok" and valid_success and success_status
+                    and not details.get("failure_category")
                     and type(details.get("consecutive_failures")) is int
                     and details["consecutive_failures"] == 0)
         failure = ("runtime_rate_limited" if status == 429

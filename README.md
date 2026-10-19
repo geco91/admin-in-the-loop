@@ -16,7 +16,7 @@ weitergegeben. Das Terminal bleibt unabhängig manuell bedienbar.
 
 ## Aktuelle persönliche Testversion
 
-**Aktuelle persönliche Testversion: v0.9.19 mit Zwischenablage als zusätzlicher Rückgabequelle.**
+**Aktuelle persönliche Testversion: v0.9.20 mit Zwischenablage ohne Terminal und korrigierter Tunnel-Health-Auswertung.**
 Links im Terminalbereich wird die Rückgabeprüfung eingestellt, rechts im AI-Bereich
 die Befehlsprüfung. Die Mitte bleibt für Code/Ausgabe und die passenden Prüfreiter
 mit Ampel und Befundzahl frei. [Echte Beispielansichten](doc/REVIEW_LAYOUT.md).
@@ -29,25 +29,29 @@ Erst dann wird der aktuelle Text aus der lokalen Zwischenablage in die Mitte
 übernommen. Dort prüfen, bei Bedarf bearbeiten und ausdrücklich an die AI
 freigeben. Standardmäßig ist diese Ausgabe unabhängig vom letzten Command;
 eine offene Terminalrückgabe bleibt offen. Eine bereits aktive Prüfung zuerst
-abschließen oder verwerfen. Das bestehende verbundene lokale Terminal wird
-weiterhin benötigt; es wird dabei kein Command ausgeführt.
+abschließen oder verwerfen. Dafür muss kein Terminal geöffnet sein; es wird
+kein Command ausgeführt.
 
 Nur Text bis 64 KiB innerhalb des bestehenden Nachrichtenlimits; unsichtbare
 Steuerzeichen einschließlich Tabs werden wie bei Terminalrückgaben abgewiesen.
 Unter Qubes muss der Text vorher in die lokale Zwischenablage des App-Qubes
 übertragen werden. Bilder und Dateien werden nicht übernommen.
 
+Für den behobenen Tunnel-Start-Timeout auch die Bridge auf v0.9.20 bringen und
+mit demselben State-Verzeichnis neu starten. Gespeicherte Kopplung und Credentials
+bleiben erhalten. [Details und Prüfnachweis](doc/RELEASE_V0.9.20.md).
+
 ## Herunterladen und ausprobieren
 
-[Python-Datei v0.9.19 herunterladen](https://raw.githubusercontent.com/geco91/admin-in-the-loop/refs/tags/v0.9.19/admin_in_the_loop.py) ·
-[Gesamtes Repository als ZIP](https://github.com/geco91/admin-in-the-loop/archive/refs/tags/v0.9.19.zip)
+[Python-Datei v0.9.20 herunterladen](https://raw.githubusercontent.com/geco91/admin-in-the-loop/refs/tags/v0.9.20/admin_in_the_loop.py) ·
+[Gesamtes Repository als ZIP](https://github.com/geco91/admin-in-the-loop/archive/refs/tags/v0.9.20.zip)
 
 Die einzelne Python-Datei genügt für die Anwendung; Tests und Dokumentation
 liegen zusätzlich im ZIP. In einem eigenen, leeren Verzeichnis herunterladen:
 
 ```bash
 curl --fail --location --proto '=https' --tlsv1.2 \
-  https://raw.githubusercontent.com/geco91/admin-in-the-loop/refs/tags/v0.9.19/admin_in_the_loop.py \
+  https://raw.githubusercontent.com/geco91/admin-in-the-loop/refs/tags/v0.9.20/admin_in_the_loop.py \
   --output admin_in_the_loop.py
 python3 admin_in_the_loop.py
 ```

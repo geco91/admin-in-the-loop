@@ -160,6 +160,63 @@ class ConnectionDialogTests(unittest.TestCase):
         self.addCleanup(self.cleanup)
         self.root.update()
 
+    def test_clipboard_review_and_bridge_return_without_opening_terminal(self):
+        self.core.start_local(self.tmp.name)
+        self.core.connect_local_bridge()
+        self.until(lambda: self.core.bridge_state == "CONNECTED")
+        self.assertIsNone(self.core.channel)
+        self.assertIsNone(self.core.session)
+        self.assertTrue(self.ui.from_terminal_button.instate(["disabled"]))
+        self.root.clipboard_clear()
+        self.root.clipboard_append("External text without terminal\n")
+        self.ui.output_mode.set("Zwischenablage")
+        self.ui.change_output_mode()
+        self.assertFalse(self.ui.from_terminal_button.instate(["disabled"]))
+        with mock.patch.object(self.core, "launch_terminal", side_effect=AssertionError("terminal launch")):
+            self.ui.from_terminal_button.invoke()
+            review = self.core.review
+            self.assertEqual(review.text, "External text without terminal\n")
+            self.assertIsNone(review.session)
+            self.assertTrue(self.ui._payload_snapshot_current(self.core.snapshot(), review))
+            self.core._disconnect()  # A terminal lifecycle change does not invalidate external text.
+            self.assertEqual(self.core.review_state, "REVIEW")
+            edited = self.core.edit_review(review.id, "Reviewed external text\n")
+            self.ui.render()
+            self.assertTrue(self.ui._payload_snapshot_current(self.core.snapshot(), edited))
+            self.core.set_paused(True)
+            self.ui.render()
+            self.assertTrue(self.ui.approve_button.instate(["disabled"]))
+            self.core.set_paused(False)
+            self.ui.render()
+            self.assertEqual(mcp(self.core.bridge_process, "get_approved_output")["outputs"], [])
+            self.ui.approve_button.invoke()
+            self.assertTrue(self.ui.from_terminal_button.instate(["disabled"]))
+            self.until(lambda: self.core.review_state == "ACKNOWLEDGED")
+            output = mcp(self.core.bridge_process, "get_approved_output")["outputs"][0]
+            self.assertEqual(output["text"], edited.text)
+            self.assertIsNone(output["submission_id"])
+            self.assertIsNone(self.core.channel)
+        # Terminal reviews still require a connected terminal; bridge trust is unchanged.
+        self.core.output.append(b"terminal output\n")
+        with self.assertRaisesRegex(a.ProbeError, "terminal_not_connected"):
+            self.core.select_output()
+        with self.assertRaisesRegex(a.ProbeError, "terminal_not_connected"):
+            self.core.review_command("true")
+        self.ui.output_mode.set("Letzte 20")
+        self.ui.change_output_mode()
+        self.assertTrue(self.ui.from_terminal_button.instate(["disabled"]))
+        self.ui.output_mode.set("Zwischenablage")
+        self.ui.change_output_mode()
+        self.ui.from_terminal_button.invoke()
+        review = self.core.review
+        self.core.disconnect_bridge()
+        self.ui.render()
+        self.assertEqual(self.core.review_state, "STALE")
+        self.assertFalse(self.ui._payload_snapshot_current(self.core.snapshot(), review))
+        with self.assertRaisesRegex(a.ProbeError, "stale_bridge_binding"):
+            self.core.approve(review.id)
+        self.assertTrue(self.ui.approve_button.instate(["disabled"]))
+
     def cleanup(self):
         self.core.close()
         for callback in self.root.tk.call("after", "info"):

@@ -1,4 +1,4 @@
-# Admin in the Loop – v0.9.19 (persönliche Testversion)
+# Admin in the Loop – v0.9.20 (persönliche Testversion)
 
 **AI assists, Admin decides.**
 
@@ -8,7 +8,7 @@ Stand des beschriebenen MVP: 30. September 2026. Die bisherige lokale Integratio
 
 ## Versionen und Versionsregel
 
-Kanonische Version: `APP_VERSION` in `admin_in_the_loop.py` (aktuell **0.9.19**); die headless Bridge zeigt dieselbe Version (`BRIDGE_SERVER_INFO`, Konsolen-Startzeile) und der GUI-Fenstertitel führt sie ebenfalls. Jeder neue ausgelieferte Programmstand erhöht mindestens den Patch-Stand (keine undokumentierten Stände); `--version` gibt die Version zeilenweise aus. Tests pinnen die Konsistenz beider Kopien.
+Kanonische Version: `APP_VERSION` in `admin_in_the_loop.py` (aktuell **0.9.20**); die headless Bridge zeigt dieselbe Version (`BRIDGE_SERVER_INFO`, Konsolen-Startzeile) und der GUI-Fenstertitel führt sie ebenfalls. Jeder neue ausgelieferte Programmstand erhöht mindestens den Patch-Stand (keine undokumentierten Stände); `--version` gibt die Version zeilenweise aus. Tests pinnen die Konsistenz beider Kopien.
 
 Einzeldatei-Download und `update [GITHUB_USER [BRANCH]]` stehen im
 [Root-README](../README.md#einfach-aktualisieren). Standard ist GeektankLabs/main;
@@ -19,6 +19,12 @@ frisch und kann einen behebbaren eigenen Client-Ausfall begrenzt neu starten.
 Die laufende Remote-Beobachtung endet nicht mehr beim ersten „verbunden“.
 Für diese Änderung auch die Bridge-Datei aktualisieren und den Dienst mit dem
 bisherigen State-Verzeichnis neu starten; siehe [Ablauf und Prüfbericht](../doc/RELEASE_V0.9.18.md).
+
+Ab v0.9.20 kann Zwischenablagetext ohne Terminal geprüft und freigegeben werden.
+Die Bridge erkennt die erfolgreiche Health-Antwort des offiziellen Clients auch
+ohne das dort bei Erfolg ausgelassene Fehlerstatusfeld `http_status`. Für diese
+Korrektur auch die Bridge aktualisieren und mit bestehendem State-Verzeichnis
+neu starten; siehe [Prüfnachweis](../doc/RELEASE_V0.9.20.md).
 
 ## Dateien und Architektur
 

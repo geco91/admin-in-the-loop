@@ -2021,6 +2021,10 @@ class TunnelTests(unittest.TestCase):
                 response = call("get_approved_output", {"submission_id": submission})
                 entry = response["structuredContent"]["outputs"][0]
                 self.assertEqual(response["content"][entry["text_content_index"]]["text"].encode(), output.payload)
+                # Observe the official client's real health JSON with the Bridge-side parser.
+                probe = a.BridgeTunnel(Path(directory, "health-probe"))
+                probe.work = tunnel.directory
+                self.assertEqual(probe._health(), (True, None))
             finally:
                 if tunnel:
                     tunnel.close()
@@ -2281,6 +2285,21 @@ class BridgeTunnelTests(unittest.TestCase):
         # A healthy control-plane poll is the only accepted readiness evidence.
         payload["details"] = {"http_status": 200, "last_success": a.datetime.now(a.timezone.utc).isoformat(),
                               "consecutive_failures": 0}
+        tunnel.checked_at = 0.0
+        self.assertEqual(tunnel.status()["phase"], "connected")
+        # Official v0.0.15 clears httpStatus on success; omitempty removes the field.
+        del payload["details"]["http_status"]
+        tunnel.checked_at = 0.0
+        self.assertEqual(tunnel.status()["phase"], "connected")
+        for invalid_status in (None, 0, True, "200", 500):
+            payload["details"]["http_status"] = invalid_status
+            tunnel.checked_at = 0.0
+            self.assertEqual(tunnel.status()["phase"], "starting")
+        del payload["details"]["http_status"]
+        payload["details"]["failure_category"] = "network"
+        tunnel.checked_at = 0.0
+        self.assertEqual(tunnel.status()["phase"], "starting")
+        del payload["details"]["failure_category"]
         tunnel.checked_at = 0.0
         self.assertEqual(tunnel.status()["phase"], "connected")
         payload["details"]["http_status"] = 429  # A retained recent success must not mask current throttling.

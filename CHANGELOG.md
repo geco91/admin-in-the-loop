@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.9.20 — Zwischenablage ohne Terminal und Tunnel-Start-Timeout beheben
+
+- „Prüfen“ ist für die Quelle Zwischenablage auch ohne geöffnetes Terminal
+  verfügbar. Bearbeiten, Byteansicht und ausdrückliche Rückgabe sind unabhängig
+  von der Terminalsitzung; Bridge-Bindung, Pause und Übertragungssperren gelten
+  weiter. Terminalausgaben und Commands benötigen weiterhin ihre lokale Sitzung.
+- Korrektur einer Regression aus 0.9.18: Der offizielle Tunnel-Client v0.0.15
+  lässt `http_status` nach erfolgreichem Poll weg. Die Bridge verlangte dieses
+  Feld irrtümlich auch bei Erfolg und konnte bis zum Start-Timeout warten.
+  Das fehlende Feld wird jetzt gemäß Upstream-Vertrag akzeptiert; frischer
+  Erfolg, Status „ok“, keine Fehlerkategorie und null laufende Fehler sind
+  weiterhin erforderlich. Explizite HTTP-Fehler bleiben gesperrt.
+- Für die Tunnelkorrektur auch die Bridge aktualisieren und mit unverändertem
+  State-Verzeichnis neu starten. Keine neue Kopplung oder Key-Eingabe nötig.
+
+Prüfnachweis und Grenzen: [v0.9.20](doc/RELEASE_V0.9.20.md).
+
 ## 0.9.19 — Zwischenablage zur Rückgabe prüfen
 
 - Links im Ausgabebereich ist „Zwischenablage“ als weitere Quelle verfügbar.
