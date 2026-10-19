@@ -1,4 +1,4 @@
-# Admin in the Loop – v0.9.16 (persönliche Testversion)
+# Admin in the Loop – v0.9.17 (persönliche Testversion)
 
 **AI assists, Admin decides.**
 
@@ -8,7 +8,7 @@ Stand des beschriebenen MVP: 30. September 2026. Die bisherige lokale Integratio
 
 ## Versionen und Versionsregel
 
-Kanonische Version: `APP_VERSION` in `admin_in_the_loop.py` (aktuell **0.9.16**); die headless Bridge zeigt dieselbe Version (`BRIDGE_SERVER_INFO`, Konsolen-Startzeile) und der GUI-Fenstertitel führt sie ebenfalls. Jeder neue ausgelieferte Programmstand erhöht mindestens den Patch-Stand (keine undokumentierten Stände); `--version` gibt die Version zeilenweise aus. Tests pinnen die Konsistenz beider Kopien.
+Kanonische Version: `APP_VERSION` in `admin_in_the_loop.py` (aktuell **0.9.17**); die headless Bridge zeigt dieselbe Version (`BRIDGE_SERVER_INFO`, Konsolen-Startzeile) und der GUI-Fenstertitel führt sie ebenfalls. Jeder neue ausgelieferte Programmstand erhöht mindestens den Patch-Stand (keine undokumentierten Stände); `--version` gibt die Version zeilenweise aus. Tests pinnen die Konsistenz beider Kopien.
 
 Einzeldatei-Download und `update [GITHUB_USER [BRANCH]]` stehen im
 [Root-README](../README.md#einfach-aktualisieren). Standard ist GeektankLabs/main;
@@ -73,7 +73,7 @@ Das Controllerfenster startet groß im Querformat. **F11** schaltet Vollbild, **
 
 Probelauf ohne AI:
 
-1. GUI in einem unkritischen Arbeitsverzeichnis starten, „Terminal öffnen“ wählen und auf „Verbunden“ warten. Die innere Bash verwendet keine Benutzerprofile und keine Shell-History.
+1. GUI in einem unkritischen Arbeitsverzeichnis starten, „Terminal öffnen“ wählen und auf „Verbunden“ warten. Die innere Bash verwendet keine Benutzerprofile. Pfeil hoch/runter navigiert in einer auf 1000 Einträge begrenzten Sitzungs-History im RAM; keine Historydatei wird gelesen oder geschrieben. History-Ersetzung (`!!`) ist ausgeschaltet. Ein neues Terminal startet mit leerer History; erst Enter führt eine aufgerufene Zeile aus.
 2. „Verbindung einstellen“ → „Weitere Optionen / lokaler Test“ aufklappen → „Offline-Testvorschlag laden“. Dafür muss die Verbindung getrennt und der Vorschlagsplatz leer sein. Beim Programmstart liegt noch kein Vorschlag vor.
 3. Rechts „← Prüfen“, den Text in der Mitte prüfen, anschließend „← Freigeben ins Terminal“. Eine geprüfte explizite Freigabe genügt auch bei unklarem Eingabezustand; die Statuszeile zeigt dann den ehrlichen Hinweis „Eingabezustand unklar“ (ggf. Passwort-/Fortsetzungs-Kennzeichnung), blockiert aber nicht.
 4. Nach dem Transfer links Ausgabe wählen und „Prüfen →“. Eine andere Auswahl lässt sich erneut in den Review übernehmen.

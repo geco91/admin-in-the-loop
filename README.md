@@ -16,7 +16,7 @@ weitergegeben. Das Terminal bleibt unabhängig manuell bedienbar.
 
 ## Aktuelle persönliche Testversion
 
-**Aktuelle persönliche Testversion: v0.9.16 mit verständlichen Hinweisen bei gesperrtem „Prüfen“.**
+**Aktuelle persönliche Testversion: v0.9.17 mit Pfeiltasten-History im Terminal.**
 Links im Terminalbereich wird die Rückgabeprüfung eingestellt, rechts im AI-Bereich
 die Befehlsprüfung. Die Mitte bleibt für Code/Ausgabe und die passenden Prüfreiter
 mit Ampel und Befundzahl frei. [Echte Beispielansichten](doc/REVIEW_LAYOUT.md).
@@ -26,15 +26,15 @@ stehen im [Changelog](CHANGELOG.md).
 
 ## Herunterladen und ausprobieren
 
-[Python-Datei v0.9.16 herunterladen](https://raw.githubusercontent.com/geco91/admin-in-the-loop/refs/tags/v0.9.16/admin_in_the_loop.py) ·
-[Gesamtes Repository als ZIP](https://github.com/geco91/admin-in-the-loop/archive/refs/tags/v0.9.16.zip)
+[Python-Datei v0.9.17 herunterladen](https://raw.githubusercontent.com/geco91/admin-in-the-loop/refs/tags/v0.9.17/admin_in_the_loop.py) ·
+[Gesamtes Repository als ZIP](https://github.com/geco91/admin-in-the-loop/archive/refs/tags/v0.9.17.zip)
 
 Die einzelne Python-Datei genügt für die Anwendung; Tests und Dokumentation
 liegen zusätzlich im ZIP. In einem eigenen, leeren Verzeichnis herunterladen:
 
 ```bash
 curl --fail --location --proto '=https' --tlsv1.2 \
-  https://raw.githubusercontent.com/geco91/admin-in-the-loop/refs/tags/v0.9.16/admin_in_the_loop.py \
+  https://raw.githubusercontent.com/geco91/admin-in-the-loop/refs/tags/v0.9.17/admin_in_the_loop.py \
   --output admin_in_the_loop.py
 python3 admin_in_the_loop.py
 ```
@@ -80,7 +80,21 @@ und Versionsprüfung sind keine Signaturprüfung oder Sicherheitsbewertung des C
 Lokale Änderungen an der Anwendungsdatei werden im Backup gesichert und ersetzt.
 Bei einem Git-Checkout stattdessen den üblichen Git-Workflow verwenden.
 
-[Veröffentlichungsumfang und Prüfnachweis](doc/RELEASE_V0.9.16.md)
+[Veröffentlichungsumfang und Prüfnachweis](doc/RELEASE_V0.9.17.md)
+
+### Frühere Terminalbefehle mit Pfeiltasten aufrufen
+
+Im geöffneten Terminal ruft **Pfeil hoch** frühere Shellbefehle auf; **Pfeil runter**
+geht wieder vorwärts bis zur aktuellen Eingabe. Erst Enter führt die bearbeitete
+Zeile aus. Manuelle und bereits freigegebene Befehle verwenden dieselbe Bash-History.
+
+Die History hält höchstens 1000 Einträge im Speicher der jeweiligen Shell.
+Sie wird nicht auf Festplatte gespeichert und nicht aus der persönlichen
+`.bash_history` importiert. Ein neues Terminal startet leer; bisherige Eingaben
+aus Versionen ohne History können nicht nachträglich übernommen werden.
+Direkt aufeinanderfolgende Duplikate und Zeilen mit führendem Leerzeichen werden
+nicht aufgenommen. Bash-History-Ersetzungen wie `!!` sind ausgeschaltet.
+Nach dem Update ein neues Terminal öffnen, damit diese Startkonfiguration gilt.
 
 ### Vorschlag vorhanden, aber „Prüfen“ ausgegraut?
 

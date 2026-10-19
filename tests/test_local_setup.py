@@ -463,7 +463,7 @@ class AppVersionConsistencyTests(unittest.TestCase):
     muessen identisch sein; --version existiert im Haupt-Parser."""
 
     def test_version_sources_pinned(self):
-        self.assertEqual(a.APP_VERSION, "0.9.16")
+        self.assertEqual(a.APP_VERSION, "0.9.17")
         self.assertEqual(a.BRIDGE_SERVER_INFO["name"], "admin-in-the-loop")
         self.assertEqual(a.BRIDGE_SERVER_INFO["version"], a.APP_VERSION)
 
@@ -612,6 +612,75 @@ class ApplicationUpdateTests(unittest.TestCase):
             response.read.assert_called_once_with(a.APP_UPDATE_LIMIT+1)
             with self.assertRaisesRegex(a.ProbeError, "update_redirect"):
                 build.call_args.args[0].redirect_request(None, None, 302, "", {}, "http://other/")
+
+
+class TerminalHistoryTests(unittest.TestCase):
+    """Real helper/PTY/Readline, including actual arrow-key bytes and explicit Enter."""
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="aitl-history-")
+        self.addCleanup(self.temp.cleanup)
+        self.fixture = a.IntegrationFixture(self.temp.name)
+        self.addCleanup(self.fixture.close)
+        self.core = self.fixture.core
+
+    def ready_file(self, name, expected):
+        path = Path(self.temp.name, name)
+        self.fixture.wait(lambda: path.exists() and path.read_bytes() == expected
+                          and self.fixture.transcript.endswith(a.PROMPT))
+
+    def test_up_down_recall_manual_and_approved_commands_without_execution(self):
+        manual = "printf x >> manual-history"
+        approved = "printf y >> approved-history"
+        self.fixture.manual(manual+"\n")
+        self.ready_file("manual-history", b"x")
+        review = self.fixture.approve_command(approved)
+        self.ready_file("approved-history", b"y")
+        checkpoint = len(self.fixture.transcript)
+        self.fixture.manual(b"\x1b[A")
+        self.fixture.wait(lambda: approved.encode() in self.fixture.transcript[checkpoint:])
+        self.assertEqual(Path(self.temp.name, "approved-history").read_bytes(), b"y")
+        checkpoint = len(self.fixture.transcript)
+        self.fixture.manual(b"\x1b[B\n")  # Down returns to the empty draft; Enter executes nothing.
+        self.fixture.wait(lambda: len(self.fixture.transcript) > checkpoint
+                          and self.fixture.transcript.endswith(a.PROMPT))
+        self.assertEqual(Path(self.temp.name, "approved-history").read_bytes(), b"y")
+        checkpoint = len(self.fixture.transcript)
+        self.fixture.manual(b"\x1bOA\x1bOA")  # Application-cursor mode used by native terminals.
+        self.fixture.wait(lambda: b"manual-history" in self.fixture.transcript[checkpoint:])
+        self.assertEqual(Path(self.temp.name, "manual-history").read_bytes(), b"x")
+        self.fixture.manual(b"\n")  # Only this deliberate manual Enter repeats the recalled command.
+        self.ready_file("manual-history", b"xx")
+        self.assertEqual(Path(self.temp.name, "approved-history").read_bytes(), b"y")
+        self.assertEqual(self.core.review.id, review.id)
+        self.assertEqual(self.core.review_state, "TRANSFERRED")
+
+    def test_history_stays_in_memory_and_new_terminal_starts_empty(self):
+        self.fixture.manual(": SESSION_HISTORY_PREVIOUS\n")
+        self.fixture.wait(lambda: b"SESSION_HISTORY_PREVIOUS" in self.fixture.transcript
+                          and self.fixture.transcript.endswith(a.PROMPT))
+        checkpoint = self.core.output.end
+        self.fixture.manual("printf '\\nHISTORY_CONFIG=%s:%s:%s\\n' \"$HISTFILE\" \"$HISTSIZE\" \"$HISTFILESIZE\"\n")
+        self.fixture.wait(lambda: b"\r\nHISTORY_CONFIG=/dev/null:1000:0\r\n" in self.core.output.data)
+        self.fixture.manual("history -w; history\n")
+        self.fixture.wait(lambda: b"SESSION_HISTORY_PREVIOUS" in self.core.output.data[checkpoint:]
+                          and self.fixture.transcript.endswith(a.PROMPT))
+        self.assertFalse(Path(self.temp.name, ".bash_history").exists())
+        with tempfile.TemporaryDirectory(prefix="aitl-fresh-history-") as directory:
+            fresh = a.IntegrationFixture(directory)
+            try:
+                fresh.manual(b"\x1b[Aprintf '\\nFRESH_SESSION_OK\\n'\n")
+                fresh.wait(lambda: b"\r\nFRESH_SESSION_OK\r\n" in fresh.core.output.data)
+                self.assertNotIn(b"SESSION_HISTORY_PREVIOUS", fresh.core.output.data)
+            finally:
+                fresh.close()
+
+    def test_history_expansion_cannot_rewrite_approved_bang_literals(self):
+        self.fixture.approve_command("printf prior > history-seed")
+        self.ready_file("history-seed", b"prior")
+        review = self.fixture.approve_command('printf \'%s\' "!!" > history-literal')
+        self.ready_file("history-literal", b"!!")
+        self.assertEqual(review.payload, b'printf \'%s\' "!!" > history-literal\n')
+        self.assertEqual(self.core.review_state, "TRANSFERRED")
 
 
 class BridgeSetupDefaultsTests(unittest.TestCase):

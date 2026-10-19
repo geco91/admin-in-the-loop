@@ -91,7 +91,7 @@ Ein-Datei-Auslieferung heißt nicht Ein-Prozess-Architektur. Lokale Bridge und C
 
 Das Systemterminal stellt den Helfer über seine eigene normale Terminalsitzung dar. Der Helfer leitet Eingaben vorübergehend zur inneren Shell und deren Ausgabe zum Systemterminal. Das ist eine gezielte PTY-Vermittlung, kein Zugriff auf beliebige offene Terminalfenster. Kein tmux und keine simulierten globalen Tastendrücke.
 
-Dieser Helfer muss raw-Modus der äußeren Verbindung, Fenstergrößen, Signale, Job Control, EOF und Aufräumen korrekt behandeln. Die Umsetzung verwendet `openpty()` und eine frische interne Python-Kindrolle zum Binden des kontrollierenden TTY und Starten von Bash, kein Fork aus einem laufenden GUI-/Netzthread. Die Shell startet ohne Benutzerprofile und History; allgemeine Shellbedienung bleibt möglich, die vorhandene Alltagsshell-Konfiguration wird aber nicht übernommen. Linux-PTY-/Socket-/Job-Control-Nachweise liegen vor; macOS bleibt praktisch abzunehmen. Die Python-Warnung zu `pty.fork()` und höheren macOS-System-APIs bleibt ein technischer Hintergrund, kein Nachweis dieser Plattform. [Q1]
+Dieser Helfer muss raw-Modus der äußeren Verbindung, Fenstergrößen, Signale, Job Control, EOF und Aufräumen korrekt behandeln. Die Umsetzung verwendet `openpty()` und eine frische interne Python-Kindrolle zum Binden des kontrollierenden TTY und Starten von Bash, kein Fork aus einem laufenden GUI-/Netzthread. Die Shell startet ohne Benutzerprofile oder persistente History; ab v0.9.17 besitzt das interaktive Terminal eine auf 1000 Einträge begrenzte Bash-History im RAM für Pfeil hoch/runter. Historydateien werden nicht importiert oder geschrieben; History-Ersetzung ist ausgeschaltet. Die vorhandene Alltagsshell-Konfiguration wird nicht übernommen. Linux-PTY-/Socket-/Job-Control-Nachweise liegen vor; macOS bleibt praktisch abzunehmen. Die Python-Warnung zu `pty.fork()` und höheren macOS-System-APIs bleibt ein technischer Hintergrund, kein Nachweis dieser Plattform. [Q1]
 
 GUI und Headless-Tests verwenden denselben `AppCore`. Aktionen und `pump()` gehören auf denselben Ereignisthread. Der begrenzte Netzwerkworker liefert Daten/Ereignisse und kann weder `AppCore.approve()` noch die Terminalfreigabe auslösen. `AppCore()` ohne explizite Stores ist flüchtig. Diese privilegierte lokale Programmschnittstelle darf nicht als AI-Tool oder freigabeferner HTTP-Endpunkt veröffentlicht werden.
 
@@ -362,7 +362,7 @@ Die Fortschreibung benötigt keine neue Geschäfts- oder Architekturentscheidung
 |---|---|---|
 | Ein oder zwei Fenster | Tkinter plus kontrolliertes Systemterminal; lokal implementiert | Ein eingebettetes Fenster ist ausgeschlossen und benötigt einen gesondert geänderten Auftrag |
 | Finales Return beim Erststart | An, danach lokale gespeicherte Wahl | Ausschalten verhindert nicht die Wirkung interner LF |
-| Shellprofil | Kontrollierte interaktive Bash ohne Benutzerprofile und History | Übernahme einer Alltagsshell-Konfiguration ist nicht implementiert und kein neuer MVP-Auftrag |
+| Shellprofil | Kontrollierte interaktive Bash ohne Benutzerprofile; begrenzte History nur im RAM | Keine persistente History oder Übernahme der Alltagsshell-Konfiguration; Pfeiltasten-History ab v0.9.17 |
 | Headless und GUI | Gemeinsamer Kern, historische Linux-/Xvfb-Nachweise | Native Debian-/macOS-Proben bleiben offen |
 | Bridge-Scope | Lokaler/Remote-Transport und Tunnel-Lifecycle implementiert; Offline-Modus bleibt bewusst wählbar | Echter Providerbetrieb und Betriebstrennung verlangen die noch offenen Abnahmen |
 

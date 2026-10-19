@@ -7,7 +7,7 @@ Bridge-only: python3 admin_in_the_loop.py --bridge --state-dir DIR
 Tkinter + native terminal + authenticated local IPC; optional transport-only bridge.
 The helper is the only reader of the shell PTY; the Controller reads an IPC copy.
 Both GUI and tests use AppCore. Tests use a clean temporary Bash, never sudo/SSH.
-The GUI shell starts in the launching directory, without profiles or history.
+The GUI shell starts in the launching directory, without profiles or persistent history.
 This is a local prototype, not an isolation boundary or production security claim.
 Synthetic password inputs exist transiently, but are never recorded as input.
 Report output contains fixed test labels and metadata, never terminal content.
@@ -44,13 +44,13 @@ from types import MappingProxyType
 # Kanonische Version (Journal 8.10.: jede ausgelieferte Codeaenderung erhoehrt
 # mindestens den Patch-Stand). BRIDGE_SERVER_INFO pflegt eine separate Kopie im
 # Bridge-Block; ein Konsistenztest pinnt beide auf denselben Wert.
-APP_VERSION = "0.9.16"
+APP_VERSION = "0.9.17"
 
 
 # Single canonical UI/CLI version. The embedded bridge block keeps its own copy in
 # BRIDGE_SERVER_INFO; a consistency test pins both to the same value (Journal #88ff:
 # every delivered program state bumps at least the patch digit).
-APP_VERSION = "0.9.16"
+APP_VERSION = "0.9.17"
 
 
 def _load_bridge_component(namespace=None):
@@ -381,9 +381,9 @@ def classify_input_tail(data: bytes) -> str:
 
 
 class PtySession:
-    """One owner, no input history; bytes are captured only from PTY reads."""
+    """One owner; optional Bash session history, no persistent input history."""
 
-    def __init__(self, directory: str, *, capacity: int = 4 * 1024 * 1024):
+    def __init__(self, directory: str, *, capacity: int = 4 * 1024 * 1024, history: bool = False):
         require(os.name == "posix", "unix_required")
         bash = shutil.which("bash")
         require(bool(bash), "bash_required")
@@ -395,11 +395,12 @@ class PtySession:
         self.master, slave = os.openpty()
         termios.tcsetwinsize(slave, (24, 80))
         # Explicit allowlist: no inherited bridge tokens, SSH agent or Python path.
-        # Tests use no startup files and disable shell history.
+        # Low-level probes keep history off; the interactive helper opts in to RAM-only history.
         child_env = {
             "PATH": "/usr/bin:/bin", "TERM": "xterm-256color", "LC_ALL": "C",
             "PS1": PROMPT.decode("ascii"), "PS2": "AITL_MORE> ",
-            "HISTFILE": "/dev/null", "HISTSIZE": "0", "HISTFILESIZE": "0",
+            "HISTFILE": "/dev/null", "HISTSIZE": "1000" if history else "0", "HISTFILESIZE": "0",
+            "HISTCONTROL": "ignoredups:ignorespace", "INPUTRC": "/dev/null",
         }
         try:
             # Fresh helper process, never preexec_fn or fork from an active GUI.
@@ -548,7 +549,8 @@ def shell_child(fd: int, bash: str) -> None:
         os.dup2(fd, destination)
     if fd > 2:
         os.close(fd)
-    os.execve(bash, [bash, "--noprofile", "--norc", "-i"], dict(os.environ))
+    # Recall is local editing; history expansion must never rewrite an approved payload.
+    os.execve(bash, [bash, "--noprofile", "--norc", "-i", "+H"], dict(os.environ))
 
 
 def expect_error(fn, code: str | None = None) -> None:
@@ -1214,7 +1216,7 @@ def run_terminal_helper(directory):
             previous_handlers[sig] = signal.signal(sig, handle_signal)
         tty.setraw(0)
         fcntl.fcntl(1, fcntl.F_SETFL, old_output_flags | os.O_NONBLOCK)
-        with PtySession(workdir) as session:
+        with PtySession(workdir, history=True) as session:
             channel.send({"type": "ready", "session": session.id})
             last_geometry = None
             while not terminate:
@@ -9793,7 +9795,7 @@ BRIDGE_RETENTION = 24 * 3600
 BRIDGE_OUTPUT_LIMIT = 64 * 1024
 BRIDGE_BLOCK_SIZES = ("SINGLE", "SMALL", "MEDIUM", "LARGE")
 BRIDGE_VERSIONS = ("2026-07-28", "2025-11-25", "2025-06-18", "2025-03-26")
-BRIDGE_SERVER_INFO = {"name": "admin-in-the-loop", "version": "0.9.16"}
+BRIDGE_SERVER_INFO = {"name": "admin-in-the-loop", "version": "0.9.17"}
 BRIDGE_BASE32 = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 # M9 Folgeaenderung (Operator-Journal 100): pairing-code validity 10 minutes; the
 # attempt limit (5), claim-path cooldown and the separate PAIR_PENDING token lifetime

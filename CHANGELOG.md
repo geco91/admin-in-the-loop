@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.9.17 — Pfeiltasten-History im Terminal
+
+- Das interaktive Terminal nutzt die bestehende Bash-/Readline-History: Pfeil
+  hoch ruft frühere Befehle auf, Pfeil runter geht zur aktuellen Eingabe zurück.
+  Aufrufen führt nichts aus; erst Enter startet die Zeile als manuelle Eingabe.
+- Maximal 1000 Einträge pro Shell im RAM. Kein Lesen oder Schreiben der
+  persönlichen Historydatei. Neue Terminals starten leer; frühere Eingaben aus
+  Versionen ohne History lassen sich nicht nachträglich wiederherstellen.
+- Manuelle und lokal freigegebene Befehle teilen die Shell-History. Direkt
+  aufeinanderfolgende Duplikate und Zeilen mit führendem Leerzeichen werden
+  ausgelassen. Bash-History-Ersetzung ist ausgeschaltet, damit etwa `!!` einen
+  freigegebenen Commandtext nicht umschreibt. Keine zusätzlichen Abhängigkeiten.
+
+Prüfnachweis und Bezug: [v0.9.17](doc/RELEASE_V0.9.17.md).
+
 ## 0.9.16 — Sperrgrund für „Prüfen“ sichtbar machen
 
 - Reproduziert: Bridge/Tunnel verbunden und Vorschlag vorhanden, aber noch keine
