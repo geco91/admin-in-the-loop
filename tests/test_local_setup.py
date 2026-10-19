@@ -463,7 +463,7 @@ class AppVersionConsistencyTests(unittest.TestCase):
     muessen identisch sein; --version existiert im Haupt-Parser."""
 
     def test_version_sources_pinned(self):
-        self.assertEqual(a.APP_VERSION, "0.9.20")
+        self.assertEqual(a.APP_VERSION, "0.9.21")
         self.assertEqual(a.BRIDGE_SERVER_INFO["name"], "admin-in-the-loop")
         self.assertEqual(a.BRIDGE_SERVER_INFO["version"], a.APP_VERSION)
 

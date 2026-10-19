@@ -160,6 +160,68 @@ class ConnectionDialogTests(unittest.TestCase):
         self.addCleanup(self.cleanup)
         self.root.update()
 
+    def test_ai_proposal_to_clipboard_without_terminal_is_explicit_and_never_transferred(self):
+        self.core.start_local(self.tmp.name)
+        self.core.connect_local_bridge()
+        self.until(lambda: self.core.bridge_state == "CONNECTED")
+        self.ui.command_target.set("Zwischenablage")
+        self.ui.command_target_picker.event_generate("<<ComboboxSelected>>")
+        self.root.update()
+        self.assertEqual(self.core.command_target, "CLIPBOARD")
+        self.assertEqual(self.core.output_mode, "LAST_20")  # Source and target are independent.
+        self.root.clipboard_clear()
+        self.root.clipboard_append("KEEP UNTIL APPROVAL")
+        proposal = mcp(self.core.bridge_process, "submit_proposal", {
+            "request_id": "GUI_AI_CLIPBOARD_TARGET_001", "text": "printf 'MANUAL_ONLY'"})
+        self.until(lambda: bool(self.core.inbox))
+        self.assertFalse(self.ui.from_ai_button.instate(["disabled"]))
+        with mock.patch.object(self.core, "launch_terminal", side_effect=AssertionError("terminal launch")):
+            self.ui.from_ai_button.invoke()
+            self.assertEqual(self.core.pending_take["command_target"], "CLIPBOARD")
+            self.assertTrue(self.ui.command_target_picker.instate(["disabled"]))
+            self.until(lambda: self.core.review_state == "REVIEW")
+            review = self.core.review
+            self.assertEqual(review.command_target, "CLIPBOARD")
+            self.assertIsNone(review.session)
+            self.assertFalse(review.final_return)
+            self.assertEqual(self.root.clipboard_get(), "KEEP UNTIL APPROVAL")
+            self.assertEqual(self.ui.direction.get(), "AI → Zwischenablage")
+            self.assertEqual(self.ui.approve_button.cget("text"), "In Zwischenablage kopieren")
+            self.assertFalse(self.ui.return_checkbox.winfo_ismapped())
+            with self.assertRaisesRegex(a.ProbeError, "stage_conflict"):
+                self.core.set_command_target("TERMINAL")
+            with self.assertRaisesRegex(a.ProbeError, "clipboard_target_requires_copy"):
+                self.core.approve(review.id)
+            edited = self.core.edit_review(review.id, "printf 'REVIEWED_MANUAL_ONLY'")
+            self.assertEqual(edited.command_target, "CLIPBOARD")
+            self.core._disconnect()
+            self.assertEqual(self.core.review_state, "REVIEW")
+            self.core.set_paused(True)
+            with self.assertRaisesRegex(a.ProbeError, "paused"):
+                self.core.copy_command(edited.id, self.root.clipboard_append)
+            self.assertEqual(self.root.clipboard_get(), "KEEP UNTIL APPROVAL")
+            self.core.set_paused(False)
+            self.ui.render()
+            with mock.patch.object(self.root, "clipboard_append", side_effect=tk.TclError()), \
+                    mock.patch.object(self.ui.messagebox, "showerror") as error:
+                self.ui.approve_button.invoke()
+            self.assertIn("Bitte erneut versuchen", error.call_args.args[1])
+            self.assertEqual(self.core.review_state, "REVIEW")
+            self.ui.approve_button.invoke()
+            self.assertEqual(self.core.review_state, "COPIED")
+            self.assertEqual(self.root.clipboard_get(), edited.payload.decode())
+            self.assertFalse(self.root.clipboard_get().endswith("\n"))
+            with self.assertRaisesRegex(a.ProbeError, "approval_already_consumed"):
+                self.core.copy_command(edited.id, self.root.clipboard_append)
+            self.assertIsNone(self.core.channel)
+            self.assertIsNone(self.core.open_return)
+            self.assertIsNone(self.core.last_transfer_offset)
+            self.assertFalse(self.core.transferred)
+            status = mcp(self.core.bridge_process, "get_submission_status",
+                         {"submission_id": proposal["submission_id"]})
+            self.assertEqual(status["state"], "TAKEN")
+            self.assertIn("nicht ausgeführt", self.ui.review_status.get())
+
     def test_clipboard_review_and_bridge_return_without_opening_terminal(self):
         self.core.start_local(self.tmp.name)
         self.core.connect_local_bridge()

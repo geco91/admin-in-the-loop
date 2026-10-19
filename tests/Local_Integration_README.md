@@ -1,4 +1,4 @@
-# Admin in the Loop – v0.9.20 (persönliche Testversion)
+# Admin in the Loop – v0.9.21 (persönliche Testversion)
 
 **AI assists, Admin decides.**
 
@@ -8,7 +8,7 @@ Stand des beschriebenen MVP: 30. September 2026. Die bisherige lokale Integratio
 
 ## Versionen und Versionsregel
 
-Kanonische Version: `APP_VERSION` in `admin_in_the_loop.py` (aktuell **0.9.20**); die headless Bridge zeigt dieselbe Version (`BRIDGE_SERVER_INFO`, Konsolen-Startzeile) und der GUI-Fenstertitel führt sie ebenfalls. Jeder neue ausgelieferte Programmstand erhöht mindestens den Patch-Stand (keine undokumentierten Stände); `--version` gibt die Version zeilenweise aus. Tests pinnen die Konsistenz beider Kopien.
+Kanonische Version: `APP_VERSION` in `admin_in_the_loop.py` (aktuell **0.9.21**); die headless Bridge zeigt dieselbe Version (`BRIDGE_SERVER_INFO`, Konsolen-Startzeile) und der GUI-Fenstertitel führt sie ebenfalls. Jeder neue ausgelieferte Programmstand erhöht mindestens den Patch-Stand (keine undokumentierten Stände); `--version` gibt die Version zeilenweise aus. Tests pinnen die Konsistenz beider Kopien.
 
 Einzeldatei-Download und `update [GITHUB_USER [BRANCH]]` stehen im
 [Root-README](../README.md#einfach-aktualisieren). Standard ist GeektankLabs/main;
@@ -25,6 +25,12 @@ Die Bridge erkennt die erfolgreiche Health-Antwort des offiziellen Clients auch
 ohne das dort bei Erfolg ausgelassene Fehlerstatusfeld `http_status`. Für diese
 Korrektur auch die Bridge aktualisieren und mit bestehendem State-Verzeichnis
 neu starten; siehe [Prüfnachweis](../doc/RELEASE_V0.9.20.md).
+
+Ab v0.9.21 gibt es rechts zusätzlich „Ziel für AI-Vorschläge → Zwischenablage“.
+Übernehmen, Risikoanalyse, Bearbeiten und ausdrückliches Kopieren funktionieren
+ohne Terminal. Quelle links und Ziel rechts werden unabhängig gewählt. Kopieren
+ist keine Ausführung und erzeugt keine Terminalrückgabe; siehe [Ablauf und
+Prüfnachweis](../doc/RELEASE_V0.9.21.md).
 
 ## Dateien und Architektur
 

@@ -1472,6 +1472,31 @@ class ControllerTakeFlowTests(unittest.TestCase):
             self.assertEqual(terminal.output_source, "TERMINAL")
             self.assertEqual(self.core.open_return["return_state"], "in_stage")
 
+    def test_clipboard_command_target_keeps_prior_terminal_return_open(self):
+        first = self.submit("printf 'ONE_TERMINAL_COMMAND\\n'")
+        self.core.review_pending_proposal()
+        self.fixture.wait(lambda: self.core.review_state == "REVIEW", timeout=6)
+        self.core.approve(self.core.review.id)
+        self.fixture.wait(lambda: self.core.review_state in {"TRANSFERRED", "OVERRIDE_REQUIRED"})
+        if self.core.review_state == "OVERRIDE_REQUIRED":
+            self.core.approve(self.core.review.id, override=True)
+        self.fixture.wait(lambda: self.core.review_state == "TRANSFERRED")
+        pending = dict(self.core.open_return)
+        self.core.set_command_target("CLIPBOARD")
+        second = self.submit("printf 'EXTERNAL_MANUAL_COPY'")
+        self.core.review_pending_proposal()
+        self.fixture.wait(lambda: self.core.review_state == "REVIEW", timeout=6)
+        copied = []
+        with mock.patch.object(self.core.channel, "send", side_effect=AssertionError("terminal write")):
+            self.core.copy_command(self.core.review.id, copied.append)
+        self.assertEqual(copied, ["printf 'EXTERNAL_MANUAL_COPY'"])
+        self.assertEqual(self.core.open_return, pending)
+        self.assertEqual(self.core.last_proposal_id, first)
+        self.assertEqual([item["submission_id"] for item in self.core.transferred], [first])
+        self.assertEqual(mcp(self.process, "get_submission_status", {"submission_id": second})["state"], "TAKEN")
+        self.assertEqual(self.core.take_return_review().output_source, "TERMINAL")
+        self.assertEqual(self.core.open_return["submission_id"], first)
+
     def test_clipboard_preserves_active_stage_and_rejects_invalid_text(self):
         command = self.core.review_command("true")
         with self.assertRaisesRegex(a.ProbeError, "stage_conflict"):

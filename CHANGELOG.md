@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.9.21 — Zwischenablage als Ziel für AI-Vorschläge
+
+- Rechts ist „Ziel für AI-Vorschläge“ mit Terminal oder Zwischenablage wählbar,
+  unabhängig von der Rückgabequelle links. Ziel Zwischenablage ermöglicht die
+  Übernahme eines AI-Vorschlags ohne geöffnete Shell, mit Bearbeitung, vorhandenen
+  Prüfreitern und ausdrücklichem Button „In Zwischenablage kopieren“.
+- Das Ziel wird bei Übernahme fest gebunden und beim Bearbeiten erhalten.
+  Während einer aktiven Prüfung oder Übernahme bleibt die Zielauswahl gesperrt.
+  Kopieren ändert die Zwischenablage erst nach Freigabe, hängt kein finales
+  Return an und bestätigt keine Terminalausführung. Schreibfehler erlauben
+  einen erneuten Versuch; Pause und Bridge-/Ablaufbindung bleiben wirksam.
+- Offene Terminalrückgaben und die Zuordnung früher ausgeführter Commands bleiben
+  erhalten. Die vorhandene sh-guard-Prüfung arbeitet auch ohne Terminalsitzung.
+  Die rechte Spalte ist für kleine Fenster kompakter angeordnet.
+
+Prüfnachweis und Grenzen: [v0.9.21](doc/RELEASE_V0.9.21.md).
+
 ## 0.9.20 — Zwischenablage ohne Terminal und Tunnel-Start-Timeout beheben
 
 - „Prüfen“ ist für die Quelle Zwischenablage auch ohne geöffnetes Terminal

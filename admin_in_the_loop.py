@@ -44,13 +44,13 @@ from types import MappingProxyType
 # Kanonische Version (Journal 8.10.: jede ausgelieferte Codeaenderung erhoehrt
 # mindestens den Patch-Stand). BRIDGE_SERVER_INFO pflegt eine separate Kopie im
 # Bridge-Block; ein Konsistenztest pinnt beide auf denselben Wert.
-APP_VERSION = "0.9.20"
+APP_VERSION = "0.9.21"
 
 
 # Single canonical UI/CLI version. The embedded bridge block keeps its own copy in
 # BRIDGE_SERVER_INFO; a consistency test pins both to the same value (Journal #88ff:
 # every delivered program state bumps at least the patch digit).
-APP_VERSION = "0.9.20"
+APP_VERSION = "0.9.21"
 
 
 def _load_bridge_component(namespace=None):
@@ -1470,6 +1470,12 @@ class LocalReview:
     edited: bool = False
     normalization: tuple | None = None  # Counts only; never retain original command text.
     output_source: str = "TERMINAL"
+    command_target: str = "TERMINAL"
+
+    @property
+    def requires_terminal(self):
+        return (self.direction == "TO_TERMINAL" and self.command_target == "TERMINAL"
+                or self.direction == "TO_OUTPUT_SINK" and self.output_source == "TERMINAL")
 
     @property
     def presentation(self):
@@ -1497,6 +1503,7 @@ class AppSnapshot:
     command_risk: object = None
 
 
+COMMAND_TARGETS = {"TERMINAL": "Terminal", "CLIPBOARD": "Zwischenablage"}
 BLOCK_SIZES = ("SINGLE", "SMALL", "MEDIUM", "LARGE")
 OUTPUT_MODES = {
     "LAST_1": "Letzte Zeile",
@@ -2707,8 +2714,8 @@ class CommandRiskReviewer:
     def poll(self, review, review_state, connection, session, bridge_binding):
         self._owner()
         bound = (self.enabled and review is not None and review.direction == "TO_TERMINAL"
-                 and connection == "CONNECTED"
-                 and review.session == session
+                 and (review.command_target == "CLIPBOARD"
+                      or connection == "CONNECTED" and review.session == session)
                  and (review.bridge_binding is None or review.bridge_binding == bridge_binding)
                  and (review.expires_at is None or time.time() < review.expires_at))
         eligible = bound and review_state in {"REVIEW", "OVERRIDE_REQUIRED"}
@@ -2719,7 +2726,7 @@ class CommandRiskReviewer:
         # mutation, expiry or binding change invalidates instead. UNAVAILABLE/
         # UNKNOWN carry no colors/checked state and keep the pre-M3 discard at
         # sent states (frozen evidence semantics, test_command_risk.py).
-        sent_keep = (bound and review_state in {"CHECKING", "TRANSFERRED", "TRANSFER_UNCERTAIN"}
+        sent_keep = (bound and review_state in {"CHECKING", "TRANSFERRED", "TRANSFER_UNCERTAIN", "COPIED"}
                      and self.result is not None and self.result.state == "RESULT"
                      and _risk_review_valid(review)
                      and self.result.key == self._review_key(review))
@@ -4380,6 +4387,7 @@ class AppCore:
         self.offsets = {}
         self.preferences = "SMALL"
         self.final_return = True
+        self.command_target = "TERMINAL"
         self.preference_store = preference_store
         if preference_store is not None:
             self.final_return, self.preferences = preference_store.load()
@@ -5200,7 +5208,8 @@ class AppCore:
                     self.pending_take = None
                     self.review_state = pending["prior_state"]
                     if value["status"] != "taken" or text is None \
-                            or self.session is None or self.connection != "CONNECTED":
+                            or pending["command_target"] == "TERMINAL" \
+                            and (self.session is None or self.connection != "CONNECTED"):
                         # Benign rejection or unconstructable ACK: devalue the nonce, drop the
                         # cache entry, never build a phantom review; a bridge-committed TAKEN
                         # is not rolled back (documented orphan until retention expiry).
@@ -5211,7 +5220,7 @@ class AppCore:
                         self.proposal_metadata.pop(value["submission_id"], None)
                         worker.post("poll")
                         continue
-                    review = self.review_command(text, pending["final_return"])
+                    review = self.review_command(text, pending["final_return"], target=pending["command_target"])
                     self.review = replace(review, proposal_id=value["submission_id"],
                                           expires_at=value["expires_at"])
                     self.inbox.pop(value["submission_id"], None)
@@ -5332,7 +5341,7 @@ class AppCore:
     # --- §13 stage/return machinery (single shared review stage) ---
 
     STAGE_FREE = {"EMPTY", "REJECTED", "ACKNOWLEDGED", "ACKNOWLEDGED_LOCAL", "STALE",
-                  "TRANSFERRED", "TRANSFER_UNCERTAIN"}
+                  "TRANSFERRED", "TRANSFER_UNCERTAIN", "COPIED"}
 
     def _require_free_stage(self):
         """Core-side initiation barrier: checked BEFORE any network send."""
@@ -5458,21 +5467,26 @@ class AppCore:
         return self.review_pending_proposal()
 
     def _new_review(self, direction, text, payload, final_return=False, lost_prefix=False, normalization=None,
-                    output_source="TERMINAL"):
+                    output_source="TERMINAL", command_target="TERMINAL"):
         require(self.review_state not in {"CHECKING", "TRANSFERRING", "SENDING", "DELIVERY_UNCERTAIN",
                                           "TAKE_PENDING"}, "transfer_in_progress")
-        clipboard = direction == "TO_OUTPUT_SINK" and output_source == "CLIPBOARD"
+        clipboard = (direction == "TO_OUTPUT_SINK" and output_source == "CLIPBOARD"
+                     or direction == "TO_TERMINAL" and command_target == "CLIPBOARD")
         require(clipboard or self.session is not None and self.connection == "CONNECTED",
                 "terminal_not_connected")
         self._command_risk.invalidate()
         self.revision += 1
         self.review = LocalReview(uuid.uuid4().hex, self.revision, direction, None if clipboard else self.session,
                                   text, payload, final_return, lost_prefix, self._bridge_binding(),
-                                  normalization=normalization, output_source=output_source)
+                                  normalization=normalization, output_source=output_source, command_target=command_target)
         self.review_state = "REVIEW"
         return self.review
 
     def review_proposal(self, identifier, final_return=None):
+        if self.command_target == "CLIPBOARD":
+            final_return = False
+        elif final_return is None:
+            final_return = self.final_return
         require(identifier in self.inbox, "unknown_proposal")
         metadata = self.proposal_metadata.get(identifier)
         if metadata is None:
@@ -5490,7 +5504,7 @@ class AppCore:
                              "recipient": metadata[0], "bridge_instance": self.bridge_instance,
                              "bridge_generation": self.bridge_generation, "expires_at": metadata[1],
                              "created_at": time.time(), "prior_state": self.review_state,
-                             "final_return": final_return}
+                             "final_return": final_return, "command_target": self.command_target}
         self.review_state = "TAKE_PENDING"
         self.bridge_worker.post("take", (identifier, self.pending_take["take_request_id"]))
         return None
@@ -5499,22 +5513,30 @@ class AppCore:
         require(bool(self.inbox), "no_pending_proposal")
         return self.review_proposal(next(iter(self.inbox)))
 
-    def review_command(self, text, final_return=None):
+    def set_command_target(self, target):
+        require(type(target) is str and target in COMMAND_TARGETS, "invalid_command_target")
+        self._require_free_stage()
+        self.command_target = target
+
+    def review_command(self, text, final_return=None, target=None):
+        target = self.command_target if target is None else target
+        require(type(target) is str and target in COMMAND_TARGETS, "invalid_command_target")
         if final_return is None:
-            final_return = self.final_return
+            final_return = self.final_return if target == "TERMINAL" else False
+        require(target != "CLIPBOARD" or final_return is False, "clipboard_return_forbidden")
         payload = normalize_command(text, final_return)
         normalized = text.replace("\r\n", "\n").replace("\r", "\n")
         counts = (text.count("\r\n"), text.count("\r") - text.count("\r\n"),
                   len(normalized) - len(normalized.rstrip("\n")))
         return self._new_review("TO_TERMINAL", payload.decode("utf-8"), payload, final_return,
-                                normalization=counts)
+                                normalization=counts, command_target=target)
 
     def edit_review(self, identifier, text, final_return=None):
         self._active(identifier)
         require(self.review_state in {"REVIEW", "OVERRIDE_REQUIRED"}, "review_not_editable")
         if self.review.direction == "TO_TERMINAL":
             previous = self.review
-            self.review_command(text, final_return)
+            self.review_command(text, final_return, target=previous.command_target)
             self.review = replace(self.review, proposal_id=previous.proposal_id, expires_at=previous.expires_at,
                                   edited=previous.edited or self.review.text.rstrip("\n") != previous.text.rstrip("\n"))
             return self.review
@@ -5574,8 +5596,8 @@ class AppCore:
 
     def _active(self, identifier):
         require(self.review is not None and self.review.id == identifier, "stale_review")
-        clipboard = self.review.direction == "TO_OUTPUT_SINK" and self.review.output_source == "CLIPBOARD"
-        require(clipboard or self.review.session == self.session and self.connection == "CONNECTED",
+        require(not self.review.requires_terminal
+                or self.review.session == self.session and self.connection == "CONNECTED",
                 "stale_session")
         if self.review.bridge_binding:
             require(self.review.bridge_binding == self._bridge_binding(), "stale_bridge_binding")
@@ -5610,8 +5632,21 @@ class AppCore:
                                  "expires": review.expires_at,
                                  "text_preview": review.text[:64]})
 
+    def copy_command(self, identifier, writer):
+        """Commit the exact reviewed bytes to a local clipboard only after explicit approval."""
+        self._active(identifier)
+        require(self.review.direction == "TO_TERMINAL" and self.review.command_target == "CLIPBOARD",
+                "not_clipboard_target")
+        require(not self.paused, "paused")
+        require(self.review_state == "REVIEW", "approval_already_consumed")
+        require(callable(writer), "clipboard_writer_required")
+        writer(self.review.payload.decode("utf-8"))  # Failure leaves the review available to retry.
+        self.review_state = "COPIED"
+
     def approve(self, identifier, override=False, submission_id=None, explicit_binding=False):
         self._active(identifier)
+        require(self.review.direction != "TO_TERMINAL" or self.review.command_target == "TERMINAL",
+                "clipboard_target_requires_copy")
         require(type(override) is bool, "override_type")
         require(type(explicit_binding) is bool, "invalid_binding_mode")
         require(not self.paused, "paused")
@@ -5717,7 +5752,8 @@ class AppCore:
         if self.preference_store:
             self.preference_store.save(value, self.preferences)
         self.final_return = value
-        if self.review and self.review.direction == "TO_TERMINAL" and self.review_state in {"REVIEW", "OVERRIDE_REQUIRED"}:
+        if self.review and self.review.direction == "TO_TERMINAL" and self.review.command_target == "TERMINAL" \
+                and self.review_state in {"REVIEW", "OVERRIDE_REQUIRED"}:
             return self.edit_review(self.review.id, self.review.text, value)
 
     def pump(self):
@@ -5814,9 +5850,8 @@ class AppCore:
             self.review_state = "TRANSFER_UNCERTAIN"
             if self.review is not None and self.review.direction == "TO_TERMINAL":
                 self._record_uncertain_transfer(self.output.end)
-        elif self.review_state in {"REVIEW", "OVERRIDE_REQUIRED"} and not (
-                self.review and self.review.direction == "TO_OUTPUT_SINK"
-                and self.review.output_source == "CLIPBOARD"):
+        elif self.review_state in {"REVIEW", "OVERRIDE_REQUIRED"} \
+                and self.review and self.review.requires_terminal:
             self.review_state = "STALE"
 
     def close(self):
@@ -8046,13 +8081,21 @@ class ReviewUI:
         right_space = ttk.Frame(right)
         right_space.grid(row=1, column=0, sticky="nsew")
         ttk.Label(right_space, text="Command-Blockgröße", anchor="center", justify="center").pack(
-            fill="x", pady=(18, 5))
+            fill="x", pady=(5, 2))
         self.preference = tk.StringVar(value=core.preferences)
         preference = ttk.Combobox(right_space, textvariable=self.preference,
                                   values=BLOCK_SIZES, state="readonly", width=12, justify="center")
         preference.pack(fill="x")
         preference.bind("<<ComboboxSelected>>", lambda _: self.action(lambda: core.set_preferences(self.preference.get())))
-        ttk.Separator(right_space, orient="horizontal").pack(fill="x", pady=(20, 12))
+        ttk.Label(right_space, text="Ziel für AI-Vorschläge", anchor="center", justify="center").pack(fill="x", pady=(6, 2))
+        self.command_target = tk.StringVar(value=COMMAND_TARGETS[core.command_target])
+        self.command_target_picker = ttk.Combobox(right_space, textvariable=self.command_target,
+            values=tuple(COMMAND_TARGETS.values()), state="readonly", justify="center")
+        self.command_target_picker.pack(fill="x")
+        self.command_target_picker.bind("<<ComboboxSelected>>", lambda _: self.action(
+            lambda: core.set_command_target(next(key for key, label in COMMAND_TARGETS.items()
+                                                if label == self.command_target.get()))))
+        ttk.Separator(right_space, orient="horizontal").pack(fill="x", pady=(6, 6))
         ttk.Label(right_space, text="Chat-Code", anchor="center", justify="center",
                   font=("TkDefaultFont", 10, "bold")).pack(fill="x", pady=(0, 4))
         self.chat_code = tk.StringVar(value="")
@@ -8855,9 +8898,9 @@ class ReviewUI:
         self._render_payload_details(self.core.snapshot())
 
     def _payload_snapshot_current(self, snapshot, review):
-        clipboard = review.direction == "TO_OUTPUT_SINK" and review.output_source == "CLIPBOARD"
         return (snapshot.review == review
-                and (clipboard or snapshot.session == review.session and snapshot.connection == "CONNECTED")
+                and (not review.requires_terminal
+                     or snapshot.session == review.session and snapshot.connection == "CONNECTED")
                 and snapshot.review_state != "STALE"
                 and (not review.bridge_binding or review.bridge_binding == self.core._bridge_binding())
                 and (review.expires_at is None or review.expires_at > time.time()))
@@ -8994,6 +9037,16 @@ class ReviewUI:
             require(snapshot.review is not None, "no_review")
             if snapshot.review_state == "DELIVERY_UNCERTAIN":
                 self.core.retry_output(snapshot.review.id)
+                return
+            if snapshot.review.direction == "TO_TERMINAL" and snapshot.review.command_target == "CLIPBOARD":
+                def write_clipboard(text):
+                    try:
+                        self.root.clipboard_clear()
+                        self.root.clipboard_append(text)
+                    except self.tk.TclError:
+                        raise ProbeError("Zwischenablage konnte nicht beschrieben werden. "
+                                         "Bitte erneut versuchen.") from None
+                self.core.copy_command(snapshot.review.id, write_clipboard)
                 return
             override = snapshot.review_state == "OVERRIDE_REQUIRED"
             if override and not self.messagebox.askyesno("Prompt unbekannt", "Shell-Prompt nicht erkannt. Trotzdem genau diesen Review an diese Sitzung senden?", parent=self.root):
@@ -9175,12 +9228,18 @@ class ReviewUI:
                                   and snapshot.review_state in {"REVIEW", "OVERRIDE_REQUIRED"})
         ready = bool(snapshot.inbox)
         parked = self.core.staged_handoff is not None
-        can_review = connected and not busy and (ready or parked) and not proposal_review_active
+        next_target = (self.core.staged_handoff["review"].command_target if parked
+                       else self.core.command_target)
+        command_ready = connected or next_target == "CLIPBOARD"
+        self.command_target.set(COMMAND_TARGETS[self.core.command_target])
+        self.command_target_picker.configure(state="readonly" if snapshot.review_state in self.core.STAGE_FREE
+                                              and self.core.pending_take is None else "disabled")
+        can_review = command_ready and not busy and (ready or parked) and not proposal_review_active
         self.from_ai_button.configure(state="normal" if can_review else "disabled")
         proposal_status = "Command-Vorschlag vorhanden" if ready else (
             "Geparkter Vorschlag vorhanden" if parked else "Kein Command-Vorschlag")
         if ready or parked:
-            if not connected:
+            if not command_ready:
                 proposal_status += "\n" + {
                     "WAITING_FOR_TERMINAL": "Zuerst links Terminal öffnen",
                     "STARTING_SHELL": "Terminal verbindet · bitte warten",
@@ -9205,7 +9264,7 @@ class ReviewUI:
         review = snapshot.review
         self.normalization.set(normalization_summary(review) if review else "")
         command = review is not None and review.direction == "TO_TERMINAL"
-        if command:
+        if command and review.command_target == "TERMINAL":
             self.return_row.grid()
             self.final_return.set(review.final_return)
             self.return_checkbox.configure(state="normal" if active else "disabled")
@@ -9213,12 +9272,15 @@ class ReviewUI:
             self.return_row.grid_remove()
         self._render_binding_row(snapshot, review, active)
         output_direction = "Zwischenablage → AI" if review and review.output_source == "CLIPBOARD" else "Terminal → AI"
-        self.direction.set("AI → Terminal" if command else output_direction if review else "")
+        self.direction.set(("AI → Zwischenablage" if review.command_target == "CLIPBOARD" else "AI → Terminal")
+                           if command else output_direction if review else "")
         if review and review.edited:
             self.direction.set(self.direction.get() + " · lokal bearbeitet")
         if review and snapshot.review_state in SENT_REVIEW_STATES:
             self.direction.set(self.direction.get() + " · gesendet")
-        self.approve_button.configure(text="← Freigeben ins Terminal" if command else "Freigeben an AI →" if review else "Freigeben",
+        self.approve_button.configure(text=("In Zwischenablage kopieren" if review.command_target == "CLIPBOARD"
+                                            else "← Freigeben ins Terminal") if command
+                                           else "Freigeben an AI →" if review else "Freigeben",
                                        state="normal" if active and not snapshot.paused else "disabled")
         if snapshot.review_state == "DELIVERY_UNCERTAIN":
             self.approve_button.configure(text="Zustellung erneut versuchen →",
@@ -9233,13 +9295,16 @@ class ReviewUI:
                     "SENDING": "Freigegebenen Output zustellen…",
                     "ACKNOWLEDGED": "Output geteilt · Bridge bestätigt",
                     "DELIVERY_UNCERTAIN": "Zustellung ungewiss · nur derselbe freigegebene Output darf erneut zugestellt werden",
-                    "REJECTED": "Verworfen", "STALE": "Review nicht mehr gültig"}
+                    "REJECTED": "Verworfen", "STALE": "Review nicht mehr gültig",
+                    "COPIED": "In Zwischenablage kopiert · nicht ausgeführt"}
         message = messages.get(snapshot.review_state, snapshot.review_state)
         if command and "\n" in review.text.rstrip("\n"):
-            message += " | Interne Returns können bereits Befehle ausführen"
+            message += (" | Mehrzeiliger Text · Einfügen ins Terminal kann Befehle ausführen"
+                        if review.command_target == "CLIPBOARD" else
+                        " | Interne Returns können bereits Befehle ausführen")
         # M2/#74: honest non-blocking readiness label; never blocks the explicit send.
         if command and snapshot.review_state in {"REVIEW", "OVERRIDE_REQUIRED", "CHECKING"} \
-                and connected:
+                and connected and review.command_target == "TERMINAL":
             readiness = classify_input_tail(bytes(self.core.output.data[-2048:]))
             message += {"PASSWORD": " | Passwort-/Passphrase-Abfrage möglich · Eingabezustand unklar",
                         "CONTINUATION": " | Fortsetzung oder >-Prompt möglich · Eingabezustand unklar",
@@ -9843,7 +9908,7 @@ BRIDGE_RETENTION = 24 * 3600
 BRIDGE_OUTPUT_LIMIT = 64 * 1024
 BRIDGE_BLOCK_SIZES = ("SINGLE", "SMALL", "MEDIUM", "LARGE")
 BRIDGE_VERSIONS = ("2026-07-28", "2025-11-25", "2025-06-18", "2025-03-26")
-BRIDGE_SERVER_INFO = {"name": "admin-in-the-loop", "version": "0.9.20"}
+BRIDGE_SERVER_INFO = {"name": "admin-in-the-loop", "version": "0.9.21"}
 BRIDGE_BASE32 = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 # M9 Folgeaenderung (Operator-Journal 100): pairing-code validity 10 minutes; the
 # attempt limit (5), claim-path cooldown and the separate PAIR_PENDING token lifetime

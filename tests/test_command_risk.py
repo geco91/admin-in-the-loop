@@ -137,6 +137,21 @@ class FixtureTests(unittest.TestCase):
         self.core.channel.receive.return_value = []
         self.addCleanup(self.core.close)
 
+    def test_clipboard_command_is_analyzed_without_terminal_and_copy_preserves_evidence(self):
+        channel = self.core.channel
+        self.core._disconnect()
+        self.core.set_command_target("CLIPBOARD")
+        review = self.core.review_command("printf x")
+        self.enable(self.fake())
+        result = self.until(lambda item: item.state == "RESULT")
+        self.assertEqual(json.loads(self.record.read_text())["argv"][-1], review.text)
+        self.assertEqual(result.result.key.review_id, review.id)
+        copied = []
+        self.core.copy_command(review.id, copied.append)
+        self.assertEqual(copied, [review.text])
+        self.assertEqual(self.core.command_risk_snapshot().result, result.result)
+        channel.send.assert_not_called()
+
     def fake(self, mode="normal", score=0, response=None):
         # A private fixture program, pinned by its actual bytes. Not an upstream pin.
         binary = self.directory / ("fake-" + mode + "-" + uuid.uuid4().hex)
