@@ -1429,6 +1429,64 @@ class ControllerTakeFlowTests(unittest.TestCase):
         self.core.bridge_worker.events.put((self.core.worker_id, kind, value))
         self.core.pump()
 
+    def test_clipboard_roundtrip_stays_unbound_and_keeps_terminal_return_open(self):
+        submission = self.submit("printf 'CLIPBOARD_COMMAND_ONCE\\n'")
+        self.core.review_pending_proposal()
+        self.fixture.wait(lambda: self.core.review_state == "REVIEW", timeout=6)
+        self.core.approve(self.core.review.id)
+        self.fixture.wait(lambda: self.core.review_state in {"TRANSFERRED", "OVERRIDE_REQUIRED"})
+        if self.core.review_state == "OVERRIDE_REQUIRED":
+            self.core.approve(self.core.review.id, override=True)
+        self.fixture.wait(lambda: self.core.review_state == "TRANSFERRED")
+        pending = dict(self.core.open_return)
+        with mock.patch.object(self.core.channel, "send", side_effect=AssertionError("terminal write")):
+            review = self.core.select_clipboard("External report\n")
+            self.assertEqual(self.core.open_return, pending)
+            self.core.reject(review.id)
+            self.assertEqual(self.core.open_return, pending)
+            review = self.core.select_clipboard("External report\n")
+            review = self.core.edit_review(review.id, "Reviewed external report\n")
+            self.assertEqual(review.output_source, "CLIPBOARD")
+            self.assertEqual(mcp(self.process, "get_approved_output")["outputs"], [])
+            self.core.set_paused(True)
+            with self.assertRaisesRegex(a.ProbeError, "paused"):
+                self.core.approve(review.id)
+            self.core.set_paused(False)
+            self.core.approve(review.id)
+            self.fixture.wait(lambda: self.core.review_state == "ACKNOWLEDGED", timeout=6)
+            outputs = mcp(self.process, "get_approved_output")["outputs"]
+            self.assertEqual(len(outputs), 1)
+            self.assertEqual(outputs[0]["text"], "Reviewed external report\n")
+            self.assertIsNone(outputs[0]["submission_id"])
+            self.assertEqual(self.core.open_return, pending)
+            self.assertEqual(mcp(self.process, "get_approved_output",
+                                 {"submission_id": submission})["outputs"], [])
+            # Even an explicit association of external context is no terminal-return waiver.
+            linked = self.core.select_clipboard("Additional context")
+            self.core.approve(linked.id, submission_id=submission, explicit_binding=True)
+            self.fixture.wait(lambda: self.core.review_state == "ACKNOWLEDGED", timeout=6)
+            self.assertEqual(self.core.open_return, pending)
+            named = mcp(self.process, "get_approved_output", {"submission_id": submission})["outputs"]
+            self.assertEqual([item["text"] for item in named], ["Additional context"])
+            terminal = self.core.take_return_review()
+            self.assertEqual(terminal.output_source, "TERMINAL")
+            self.assertEqual(self.core.open_return["return_state"], "in_stage")
+
+    def test_clipboard_preserves_active_stage_and_rejects_invalid_text(self):
+        command = self.core.review_command("true")
+        with self.assertRaisesRegex(a.ProbeError, "stage_conflict"):
+            self.core.select_clipboard("external")
+        self.assertEqual(self.core.review, command)
+        self.core.reject(command.id)
+        for text in ("", "x" * (a.OUTPUT_LIMIT + 1), "hidden\x00text", "tab\ttext"):
+            with self.subTest(text_length=len(text)):
+                with self.assertRaises(a.ProbeError):
+                    self.core.select_clipboard(text)
+                self.assertEqual(self.core.review, command)
+        self.core.set_output_mode("CLIPBOARD")
+        with self.assertRaisesRegex(a.ProbeError, "clipboard_requires_explicit_read"):
+            self.core.select_current_output()
+
     def test_take_pending_then_ack_builds_review_and_resumes_poll(self):
         submission = self.submit("printf 'ASYNC_TAKE\\n'")
         self.assertIsNone(self.core.review_pending_proposal())

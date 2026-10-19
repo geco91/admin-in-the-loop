@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.9.19 — Zwischenablage zur Rückgabe prüfen
+
+- Links im Ausgabebereich ist „Zwischenablage“ als weitere Quelle verfügbar.
+  Erst „Prüfen“ liest den aktuellen Text; zentrale Prüfung, Bearbeitung und
+  ausdrückliche Freigabe verwenden den bestehenden Rückgabeablauf.
+- Die Quelle bleibt beim Bearbeiten erkennbar. Standardmäßig unabhängige
+  Beobachtung, keine automatische Zuordnung zum letzten Command. Eine offene
+  Terminalrückgabe wird weder durch Freigeben noch Verwerfen geschlossen.
+- Aktive Prüfungen werden nicht überschrieben. Leere oder nicht verfügbare
+  Text-Zwischenablage erhält einen Hinweis; bestehende Größen-/Zeichengrenzen,
+  Sitzungsbindung und Freigabesperren gelten weiterhin. Keine Terminalausführung.
+
+Prüfnachweis und Grenzen: [v0.9.19](doc/RELEASE_V0.9.19.md).
+
 ## 0.9.18 — Tunnel nach Controller-Kontakt frisch prüfen
 
 - Der authentifizierte Controller-Confirm stößt im Hintergrund einen frischen

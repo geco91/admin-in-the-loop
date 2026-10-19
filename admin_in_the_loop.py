@@ -44,13 +44,13 @@ from types import MappingProxyType
 # Kanonische Version (Journal 8.10.: jede ausgelieferte Codeaenderung erhoehrt
 # mindestens den Patch-Stand). BRIDGE_SERVER_INFO pflegt eine separate Kopie im
 # Bridge-Block; ein Konsistenztest pinnt beide auf denselben Wert.
-APP_VERSION = "0.9.18"
+APP_VERSION = "0.9.19"
 
 
 # Single canonical UI/CLI version. The embedded bridge block keeps its own copy in
 # BRIDGE_SERVER_INFO; a consistency test pins both to the same value (Journal #88ff:
 # every delivered program state bumps at least the patch digit).
-APP_VERSION = "0.9.18"
+APP_VERSION = "0.9.19"
 
 
 def _load_bridge_component(namespace=None):
@@ -1469,6 +1469,7 @@ class LocalReview:
     expires_at: float | None = None
     edited: bool = False
     normalization: tuple | None = None  # Counts only; never retain original command text.
+    output_source: str = "TERMINAL"
 
     @property
     def presentation(self):
@@ -1502,6 +1503,7 @@ OUTPUT_MODES = {
     "SINCE_LAST": "Seit letztem Command",
     "LAST_20": "Letzte 20", "LAST_50": "Letzte 50",
     "LAST_100": "Letzte 100", "LAST_500": "Letzte 500",
+    "CLIPBOARD": "Zwischenablage",
 }
 
 
@@ -5516,7 +5518,7 @@ class AppCore:
         require(final_return is None or type(final_return) is bool and not final_return,
                 "output_return_forbidden")
         previous = self.review
-        self._output_review(text, previous.lost_prefix)
+        self._output_review(text, previous.lost_prefix, previous.output_source)
         self.review = replace(self.review, edited=previous.edited or text != previous.text)
         return self.review
 
@@ -5539,14 +5541,20 @@ class AppCore:
         require(mode != "SINCE_LAST" or self.last_transfer_offset is not None, "no_command_transferred")
         self.output_mode = mode
 
+    def select_clipboard(self, text):
+        """Explicitly supplied plain-text snapshot; never read the OS clipboard here."""
+        self._require_free_stage()
+        return self._output_review(text, source="CLIPBOARD")
+
     def select_current_output(self):
+        require(self.output_mode != "CLIPBOARD", "clipboard_requires_explicit_read")
         if self.output_mode == "SINCE_LAST":
             require(self.last_transfer_offset is not None, "no_command_transferred")
             require(self.last_transfer_offset <= self.output.end, "output_not_yet_observed")
             return self.select_output(None, since=self.last_transfer_offset)
         return self.select_output(int(self.output_mode.split("_")[1]))
 
-    def _output_review(self, text, lost_prefix=False):
+    def _output_review(self, text, lost_prefix=False, source="TERMINAL"):
         bounded_string(text, OUTPUT_LIMIT)
         payload = text.encode("utf-8")
         require(0 < len(payload) <= OUTPUT_LIMIT, "output_selection_limit")
@@ -5555,8 +5563,9 @@ class AppCore:
         require(all(c == "\n" or c == " " or not unicodedata.category(c).startswith(("C", "Z"))
                     for c in text), "output_invisible_character")
         review = self._new_review("TO_OUTPUT_SINK", text, payload, lost_prefix=lost_prefix)
-        if self.open_return is not None and self.open_return["return_state"] in {"offen_sammelnd",
-                                                                                 "reviewbereit"}:
+        self.review = review = replace(review, output_source=source)
+        if source == "TERMINAL" and self.open_return is not None \
+                and self.open_return["return_state"] in {"offen_sammelnd", "reviewbereit"}:
             self.open_return["return_state"] = "in_stage"  # capture content staged for review
         return review
 
@@ -5628,6 +5637,8 @@ class AppCore:
                     require(type(submission_id) is str and self.output_binding_record(submission_id) is not None,
                             "unknown_output_binding")
                     proposal = submission_id
+                elif self.review.output_source == "CLIPBOARD":
+                    proposal = None  # External text never inherits the last terminal command.
                 else:
                     proposal = self.last_proposal_id if self.last_proposal_binding == self.bridge_profile.recipient \
                         and self.last_proposal_expiry and time.time() < self.last_proposal_expiry else None
@@ -5639,7 +5650,8 @@ class AppCore:
                 self.pending_output = {"recipient": self.bridge_profile.recipient, "body": body,
                                        "expires": approved_at + 86400}
                 self.review_state = "SENDING"
-                if self.open_return is not None and proposal == self.open_return["submission_id"]:
+                if self.review.output_source == "TERMINAL" and self.open_return is not None \
+                        and proposal == self.open_return["submission_id"]:
                     self.open_return["return_state"] = "sende_pending"
                 return
             self.approved_outputs.append(self.review)
@@ -5675,7 +5687,8 @@ class AppCore:
         self._active(identifier)
         require(self.review_state in {"REVIEW", "OVERRIDE_REQUIRED"}, "review_not_active")
         self.review_state = "REJECTED"
-        if self.review.direction == "TO_OUTPUT_SINK" and self.open_return is not None \
+        if self.review.direction == "TO_OUTPUT_SINK" and self.review.output_source == "TERMINAL" \
+                and self.open_return is not None \
                 and self.open_return["return_state"] == "in_stage":
             # §14.2/#58: rejecting the staged return IS the deliberate completion –
             # exactly the same closure as the explicit waiver, no separate state.
@@ -8653,8 +8666,10 @@ class ReviewUI:
     def _render_command_risk(self, snapshot, command):
         risk = snapshot.command_risk
         identity = (snapshot.review.id, snapshot.review.direction) if snapshot.review else None
-        self.review_notebook.tab(self.code_tab, text="Ausgabe" if snapshot.review
-                                 and snapshot.review.direction != "TO_TERMINAL" else "Code")
+        caption = "Code"
+        if snapshot.review and snapshot.review.direction == "TO_OUTPUT_SINK":
+            caption = "Zwischenablage" if snapshot.review.output_source == "CLIPBOARD" else "Ausgabe"
+        self.review_notebook.tab(self.code_tab, text=caption)
         if identity != self.review_tab_identity:
             self.risk_settings_open = self.text_settings_open = False
             self.text_settings_direction = self._review_direction()
@@ -8946,8 +8961,9 @@ class ReviewUI:
         rows.append("Nicht gebunden (unabhängige Beobachtung)")
         mapping[rows[-1]] = None
         stable = tuple(rows)
-        default = next((label for label, value in mapping.items()
-                        if value == self.core.last_proposal_id), rows[-1])
+        default = (rows[-1] if review.output_source == "CLIPBOARD" else
+                   next((label for label, value in mapping.items()
+                         if value == self.core.last_proposal_id), rows[-1]))
         review_gone = self.last_binding_review != review.id
         if stable != self.last_binding_rows or review_gone:
             self.binding_submission = mapping
@@ -9000,6 +9016,21 @@ class ReviewUI:
 
     def from_terminal(self):
         core = self.core
+        if core.output_mode == "CLIPBOARD":
+            def load_clipboard():
+                try:
+                    core._require_free_stage()
+                except ProbeError:
+                    raise ProbeError("Bitte die offene Prüfung zuerst freigeben oder verwerfen; "
+                                     "die Zwischenablage wurde noch nicht gelesen.") from None
+                try:
+                    text = self.root.clipboard_get()
+                except self.tk.TclError:
+                    raise ProbeError("Zwischenablage enthält keinen verfügbaren Text.") from None
+                require(bool(text), "Zwischenablage ist leer.")
+                return core.select_clipboard(text)
+            self.action(load_clipboard)
+            return
         if core.open_return is not None:
             info = core.stage_conflict_info()
             if info is not None and info["direction"] == "proposal_in_stage":
@@ -9171,7 +9202,8 @@ class ReviewUI:
         else:
             self.return_row.grid_remove()
         self._render_binding_row(snapshot, review, active)
-        self.direction.set("AI → Terminal" if command else "Terminal → AI" if review else "")
+        output_direction = "Zwischenablage → AI" if review and review.output_source == "CLIPBOARD" else "Terminal → AI"
+        self.direction.set("AI → Terminal" if command else output_direction if review else "")
         if review and review.edited:
             self.direction.set(self.direction.get() + " · lokal bearbeitet")
         if review and snapshot.review_state in SENT_REVIEW_STATES:
@@ -9801,7 +9833,7 @@ BRIDGE_RETENTION = 24 * 3600
 BRIDGE_OUTPUT_LIMIT = 64 * 1024
 BRIDGE_BLOCK_SIZES = ("SINGLE", "SMALL", "MEDIUM", "LARGE")
 BRIDGE_VERSIONS = ("2026-07-28", "2025-11-25", "2025-06-18", "2025-03-26")
-BRIDGE_SERVER_INFO = {"name": "admin-in-the-loop", "version": "0.9.18"}
+BRIDGE_SERVER_INFO = {"name": "admin-in-the-loop", "version": "0.9.19"}
 BRIDGE_BASE32 = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 # M9 Folgeaenderung (Operator-Journal 100): pairing-code validity 10 minutes; the
 # attempt limit (5), claim-path cooldown and the separate PAIR_PENDING token lifetime

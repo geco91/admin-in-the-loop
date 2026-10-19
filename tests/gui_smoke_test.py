@@ -1275,6 +1275,51 @@ class StageConflictDialogTests(unittest.TestCase):
         self.assertEqual([button.cget("text") for button in self.ui.conflict_buttons.values()],
                          ordered_labels)
 
+    def test_clipboard_selection_reads_on_check_and_requires_explicit_approval(self):
+        self.submit("printf 'LOCAL_SOURCE\\n'", "GUI_CLIPBOARD_SOURCE_001")
+        self.take()
+        self.transfer()
+        self.ui.output_mode.set("Zwischenablage")
+        with mock.patch.object(self.root, "clipboard_get", side_effect=AssertionError("early read")):
+            self.ui.change_output_mode()
+            self.ui.render()
+        self.root.clipboard_clear()
+        self.root.clipboard_append("External clipboard snapshot\n")
+        pending = dict(self.core.open_return)
+        self.ui.from_terminal_button.invoke()
+        self.root.update()
+        review = self.core.review
+        self.assertEqual(review.text, "External clipboard snapshot\n")
+        self.assertEqual(review.output_source, "CLIPBOARD")
+        self.assertEqual(self.ui.direction.get(), "Zwischenablage → AI")
+        self.assertEqual(self.ui.review_notebook.tab(self.ui.code_tab, "text"), "Zwischenablage")
+        self.assertIsNone(self.ui.binding_submission[self.ui.binding_value.get()])
+        self.root.clipboard_clear()
+        self.root.clipboard_append("Changed after review")
+        self.assertEqual(self.core.review.text, "External clipboard snapshot\n")
+        self.assertEqual(mcp(self.core.bridge_process, "get_approved_output")["outputs"], [])
+        self.ui.approve_button.invoke()
+        self.until(lambda: self.core.review_state == "ACKNOWLEDGED")
+        output = mcp(self.core.bridge_process, "get_approved_output")["outputs"][0]
+        self.assertEqual(output["text"], review.text)
+        self.assertIsNone(output["submission_id"])
+        self.assertEqual(self.core.open_return, pending)
+        self.ui.from_terminal_button.invoke()
+        self.assertEqual(self.core.review.text, "Changed after review")
+
+    def test_clipboard_unavailable_and_active_review_leave_content_unchanged(self):
+        self.core.set_output_mode("CLIPBOARD")
+        with mock.patch.object(self.ui.messagebox, "showerror") as error:
+            with mock.patch.object(self.root, "clipboard_get", side_effect=tk.TclError()):
+                self.ui.from_terminal()
+            self.assertIn("keinen verfügbaren Text", error.call_args.args[1])
+            self.assertIsNone(self.core.review)
+            command = self.core.review_command("true")
+            with mock.patch.object(self.root, "clipboard_get", side_effect=AssertionError("early read")):
+                self.ui.from_terminal()
+            self.assertIn("offene Prüfung", error.call_args.args[1])
+            self.assertEqual(self.core.review, command)
+
     def test_send_conflict_dialog_cancel_escape_and_waiver_send(self):
         self.submit("printf 'GUI_STAGE_A\\n'", "GUI_STAGE_A_REQ_0001")
         self.take()
