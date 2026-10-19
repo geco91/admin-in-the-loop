@@ -1,6 +1,6 @@
 # Bridge, Secure Tunnel und AI-Chat verbinden
 
-Entwicklungsstand 0.9.11. Das Fenster „AI / MCP — Verbindung einrichten“ trennt
+Entwicklungsstand 0.9.18. Das Fenster „AI / MCP — Verbindung einrichten“ trennt
 drei Zustände: die authentifizierte Bridge-Verbindung, den OpenAI Secure MCP
 Tunnel und die bewusst gewählte Chatbindung. Ein verbundener Tunnel beweist noch
 keinen vollständigen Austausch mit dem AI-Chat.
@@ -12,7 +12,22 @@ bisherigen Zertifikats-Pin und Controller-Zugang wiederverbunden. Die Bridge
 kann im anderen Qube oder auf einem Gateway bereits weiterlaufen. Die App
 verwendet diese bestehende Einrichtung; sie fordert keinen neuen Kopplungscode
 an und rotiert keinen Chat-Code. Die authentifizierte Verbindung prüft auch den
-Tunnelstatus, ohne den Einrichtungsdialog öffnen zu müssen.
+Tunnelstatus, ohne den Einrichtungsdialog öffnen zu müssen. Nach bestätigtem
+Controller-Kontakt stößt die Bridge einen frischen Healthcheck ihres eigenen
+Tunnel-Clients an. Gesunde Clients werden weiterverwendet; ein behebbar
+ausgefallener Client wird mit der gespeicherten Konfiguration begrenzt neu gestartet.
+Key-/Rechtefehler, ungeeignete Clients, Installationsfehler und Provider-Drosselung
+verlangen weiterhin eine lokale Klärung statt einer Neustartschleife.
+
+Die Statusbeobachtung läuft nach „verbunden“ weiter. Die Bridge prüft den
+aktuellen Control-Plane-Healthstatus und akzeptiert einen erfolgreichen Kontakt
+nur innerhalb der letzten 90 Sekunden (maximal 30 Sekunden Zukunftstoleranz für
+Uhrabweichungen). GET-Statusabfragen allein starten nichts. Ein automatischer
+Wiederanlauf erfolgt bei bestätigtem Controller-Kontakt, maximal einmal innerhalb
+von 30 Sekunden. Nach einem Ausfall im laufenden Betrieb kann der Client zunächst
+selbst wieder verbinden; bleibt das aus, zeigt die Anzeige den Fehler und die
+gespeicherte Verbindung kann erneut gestartet werden. Ein verbundener Tunnel
+bleibt vom tatsächlichen Laden der Werkzeuge im AI-Chat zu unterscheiden.
 
 Für Qubes wird die eigene Qrexec-Weiterleitung im Hintergrund vorbereitet. Ein
 fremder Listener wird weder übernommen noch beendet. Fehlende Werkzeuge,
@@ -30,8 +45,10 @@ Die bestehende Client-Prüfung und gegebenenfalls Installation bleiben wirksam.
 Bei Problemen zeigt der Dialog zuerst zwei verständliche Optionen:
 „Gespeicherte Verbindung erneut starten“ und „Einrichtung / Startanleitung öffnen“.
 Für eine abgeschaltete externe Bridge führt die Anleitung zu ihrem bisherigen
-Standort und Startbefehl. Die App startet keinen Prozess im fremden Qube und
-ändert keine dom0-Policy automatisch.
+Standort und Startbefehl. Die App startet die Bridge im fremden Qube nicht
+automatisch und ändert keine dom0-Policy. Eine bereits laufende Bridge verwaltet
+ihren eigenen Tunnel-Client. Dafür ab v0.9.18 auch die Bridge aktualisieren und
+mit unverändertem State-Verzeichnis neu starten.
 
 ![Gespeicherte Verbindung wiederherstellen](assets/connection-ux/06-wiederherstellen.png)
 

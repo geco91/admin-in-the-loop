@@ -2221,8 +2221,24 @@ class BridgeTunnelTests(unittest.TestCase):
         status = tunnel.status()
         self.assertEqual((status["phase"], status["detail"]), ("starting", "runtime_rate_limited"))
         # A healthy control-plane poll is the only accepted readiness evidence.
-        payload["details"] = {"http_status": 200, "last_success": "2026-10-08T10:00:00Z",
+        payload["details"] = {"http_status": 200, "last_success": a.datetime.now(a.timezone.utc).isoformat(),
                               "consecutive_failures": 0}
+        tunnel.checked_at = 0.0
+        self.assertEqual(tunnel.status()["phase"], "connected")
+        payload["details"]["http_status"] = 429  # A retained recent success must not mask current throttling.
+        tunnel.checked_at = 0.0
+        self.assertEqual(tunnel.status()["phase"], "starting")
+        self.assertEqual(tunnel.detail, "runtime_rate_limited")
+        payload["details"]["http_status"] = 200
+        tunnel.checked_at = 0.0
+        self.assertEqual(tunnel.status()["phase"], "connected")
+        payload["details"]["last_success"] = a.datetime.fromtimestamp(
+            time.time()-tunnel.HEALTH_MAX_AGE-10, a.timezone.utc).isoformat()
+        tunnel.checked_at = 0.0
+        self.assertEqual(tunnel.status()["phase"], "starting")
+        self.assertEqual(tunnel.detail, "runtime_poll_stale")
+        self.assertEqual(len(calls), 2)  # GET observation itself never restarts anything.
+        payload["details"]["last_success"] = a.datetime.now(a.timezone.utc).isoformat()
         tunnel.checked_at = 0.0
         self.assertEqual(tunnel.status()["phase"], "connected")
         tunnel.close()
@@ -2244,6 +2260,94 @@ class BridgeTunnelTests(unittest.TestCase):
         self.assertIn("[REDACTED]", detail)
         tunnel2.close()
 
+    def test_controller_contact_reuses_healthy_tunnel_and_bounds_recovery(self):
+        spawn, calls, processes = self.recorder()
+        tunnel = self.live_tunnel(spawn)
+        self.addCleanup(tunnel.close)
+        tunnel.configure(self.tunnel_id, self.key)
+        self.settle(tunnel)
+        tunnel.worker.join(timeout=2)
+        clock = [100.0]
+        tunnel.now = lambda: clock[0]
+        with mock.patch.object(tunnel, "_health", return_value=(True, None)) as health:
+            tunnel.controller_connected()
+            tunnel.worker.join(timeout=2)
+            self.assertFalse(tunnel.worker.is_alive())
+            self.assertEqual(tunnel.phase, "connected")
+            self.assertEqual(len(calls), 1)
+            health.assert_called_once()
+            health.return_value = (False, "runtime_poll_stale")
+            tunnel.controller_connected()
+            tunnel.worker.join(timeout=2)
+            self.assertEqual(len(calls), 2)
+            self.assertEqual(tunnel.phase, "starting")
+            self.assertEqual(processes[0].exit_code, -15)
+            for _ in range(3):
+                tunnel.controller_connected()
+                tunnel.worker.join(timeout=2)
+            self.assertEqual(len(calls), 2)  # No second restart during startup/cooldown.
+            processes[-1].exit_code = 1
+            tunnel.controller_connected()
+            tunnel.worker.join(timeout=2)
+            self.assertEqual(len(calls), 2)
+            clock[0] += tunnel.RECONNECT_COOLDOWN+1
+            tunnel.controller_connected()
+            tunnel.worker.join(timeout=2)
+            self.assertEqual(len(calls), 3)
+            self.assertEqual(tunnel.config, {"tunnel_id": self.tunnel_id, "runtime_key": self.key})
+
+    def test_controller_contact_preserves_missing_config_and_rejects_fatal_or_throttled_retry(self):
+        spawn, calls, _ = self.recorder()
+        empty = self.live_tunnel(spawn)
+        empty.controller_connected()
+        self.assertEqual(empty.status()["phase"], "missing")
+        self.assertEqual(calls, [])
+        empty.close()
+        for failure in ("runtime_key_rejected", "runtime_permission_denied", "runtime_tunnel_not_found",
+                        "client_health_unsupported", "runtime_rate_limited"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory(dir=self.temp.name) as directory:
+                spawn, calls, _ = self.recorder()
+                tunnel = self.live_tunnel(spawn, directory)
+                try:
+                    tunnel.configure(self.tunnel_id, self.key)
+                    self.settle(tunnel)
+                    tunnel.worker.join(timeout=2)
+                    tunnel.phase = "connected"
+                    with mock.patch.object(tunnel, "_health", return_value=(False, failure)):
+                        for _ in range(2):
+                            tunnel.controller_connected()
+                            tunnel.worker.join(timeout=2)
+                    self.assertEqual(len(calls), 1)
+                    self.assertEqual(tunnel.detail, failure)
+                finally:
+                    tunnel.close()
+
+    def test_close_during_contact_check_prevents_late_restart(self):
+        spawn, calls, _ = self.recorder()
+        tunnel = self.live_tunnel(spawn)
+        self.addCleanup(tunnel.close)
+        tunnel.configure(self.tunnel_id, self.key)
+        self.settle(tunnel)
+        tunnel.worker.join(timeout=2)
+        entered, release = threading.Event(), threading.Event()
+        def health():
+            entered.set()
+            release.wait(2)
+            return False, "runtime_network_unavailable"
+        tunnel.phase = "connected"
+        with mock.patch.object(tunnel, "_health", side_effect=health):
+            tunnel.controller_connected()
+            self.assertTrue(entered.wait(2))
+            cancel = tunnel.worker_cancel
+            closer = threading.Thread(target=tunnel.close)
+            closer.start()
+            self.assertTrue(cancel.wait(2))
+            release.set()
+            closer.join(timeout=3)
+            self.assertFalse(closer.is_alive())
+        self.assertEqual(len(calls), 1)
+        self.assertIsNone(tunnel.process)
+
     def test_controller_only_endpoints_and_validation(self):
         with tempfile.TemporaryDirectory(prefix="aitl-tunnel-http-") as directory:
             store = a.BridgeStore(directory, uuid.uuid4().hex, clock=lambda: time.time())
@@ -2253,6 +2357,13 @@ class BridgeTunnelTests(unittest.TestCase):
             harness = ServiceHarness(store, controller, controller_id, ai, ai_id)
             self.addCleanup(harness.close)
             profile = harness.profile
+            with mock.patch.object(harness.service.tunnel, "controller_connected") as recover:
+                self.assertEqual(request(profile.url, "POST", path="/v1/pair/confirm", body={"version": 1})[0], 401)
+                self.assertEqual(request(profile.url, "POST", path="/v1/pair/confirm", body={"version": 1},
+                                         headers={"Authorization": "Bearer " + ai})[0], 401)
+                recover.assert_not_called()
+                a.BridgeHTTP(profile).request("POST", "/v1/pair/confirm", {"version": 1})
+                recover.assert_called_once()
             self.assertEqual(a.BridgeHTTP(profile).request("GET", "/v1/tunnel/status"),
                              {"version": 1, "phase": "missing", "detail": "", "step": ""})
             self.assertEqual(request(profile.url, path="/v1/tunnel/status")[0], 401)
@@ -2597,6 +2708,23 @@ class RemoteTunnelCoordinationTests(unittest.TestCase):
             self.core.save_remote_tunnel("tunnel_" + "a" * 32, "k" * 32)
         self.assertEqual(str(caught.exception), "tunnel_config_busy")
         self.core.remote_tunnel_busy = False
+
+    def test_connected_probe_keeps_observing_and_bounds_lost_health(self):
+        phase, calls = ["connected"], []
+        def status():
+            calls.append(phase[0])
+            return {"version": 1, "phase": phase[0], "detail": "", "step": ""}
+        with mock.patch.object(self.harness.service.tunnel, "status", side_effect=status), \
+                mock.patch.object(a.RemoteTunnelProbe, "POLL_INTERVAL", .03), \
+                mock.patch.object(a.RemoteTunnelProbe, "OVERALL_TIMEOUT", .15):
+            self.core.begin_tunnel_probe()
+            self.wait(lambda: len(calls) >= 10)
+            self.assertEqual(self.core.remote_tunnel["phase"], "connected")
+            self.assertTrue(self.core.remote_tunnel_probe.alive())
+            phase[0] = "starting"
+            self.wait(lambda: self.core.remote_tunnel_error == "tunnel_status_timeout")
+            self.assertEqual(self.core.remote_tunnel["phase"], "error")
+            self.assertGreater(calls.count("connected"), 5)
 
     def test_probe_save_and_disconnect_clear_state(self):
         key = "k" * 32

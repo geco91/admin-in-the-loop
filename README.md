@@ -16,7 +16,7 @@ weitergegeben. Das Terminal bleibt unabhängig manuell bedienbar.
 
 ## Aktuelle persönliche Testversion
 
-**Aktuelle persönliche Testversion: v0.9.17 mit Pfeiltasten-History im Terminal.**
+**Aktuelle persönliche Testversion: v0.9.18 mit frischer Tunnelprüfung und Wiederanlauf nach Controller-Kontakt.**
 Links im Terminalbereich wird die Rückgabeprüfung eingestellt, rechts im AI-Bereich
 die Befehlsprüfung. Die Mitte bleibt für Code/Ausgabe und die passenden Prüfreiter
 mit Ampel und Befundzahl frei. [Echte Beispielansichten](doc/REVIEW_LAYOUT.md).
@@ -26,15 +26,15 @@ stehen im [Changelog](CHANGELOG.md).
 
 ## Herunterladen und ausprobieren
 
-[Python-Datei v0.9.17 herunterladen](https://raw.githubusercontent.com/geco91/admin-in-the-loop/refs/tags/v0.9.17/admin_in_the_loop.py) ·
-[Gesamtes Repository als ZIP](https://github.com/geco91/admin-in-the-loop/archive/refs/tags/v0.9.17.zip)
+[Python-Datei v0.9.18 herunterladen](https://raw.githubusercontent.com/geco91/admin-in-the-loop/refs/tags/v0.9.18/admin_in_the_loop.py) ·
+[Gesamtes Repository als ZIP](https://github.com/geco91/admin-in-the-loop/archive/refs/tags/v0.9.18.zip)
 
 Die einzelne Python-Datei genügt für die Anwendung; Tests und Dokumentation
 liegen zusätzlich im ZIP. In einem eigenen, leeren Verzeichnis herunterladen:
 
 ```bash
 curl --fail --location --proto '=https' --tlsv1.2 \
-  https://raw.githubusercontent.com/geco91/admin-in-the-loop/refs/tags/v0.9.17/admin_in_the_loop.py \
+  https://raw.githubusercontent.com/geco91/admin-in-the-loop/refs/tags/v0.9.18/admin_in_the_loop.py \
   --output admin_in_the_loop.py
 python3 admin_in_the_loop.py
 ```
@@ -80,7 +80,28 @@ und Versionsprüfung sind keine Signaturprüfung oder Sicherheitsbewertung des C
 Lokale Änderungen an der Anwendungsdatei werden im Backup gesichert und ersetzt.
 Bei einem Git-Checkout stattdessen den üblichen Git-Workflow verwenden.
 
-[Veröffentlichungsumfang und Prüfnachweis](doc/RELEASE_V0.9.17.md)
+[Veröffentlichungsumfang und Prüfnachweis](doc/RELEASE_V0.9.18.md)
+
+### Tunnel nach Ruhezustand oder erneutem App-Start prüfen
+
+Nach „Controller-Kontakt: Kopplung bestätigt“ prüft die Bridge ihren konfigurierten
+Tunnel frisch im Hintergrund. Ein gesunder eigener Client läuft weiter. Bei
+behebbarem Ausfall wird einmal mit den gespeicherten Werten neu gestartet,
+höchstens ein solcher Wiederanlauf innerhalb von 30 Sekunden. Key-/Rechtefehler
+und Provider-Drosselung lösen dabei keinen Neustart aus. Eine neue Kopplung
+oder das erneute Eingeben des Runtime Keys ist für die Wiederherstellung nicht nötig.
+
+Der Controller beobachtet den Remote-Tunnel weiter, auch nachdem „verbunden“
+erreicht wurde. Ein alter Erfolgsstatus bleibt dadurch nicht unbegrenzt grün.
+Ein erfolgreicher Providerkontakt darf höchstens 90 Sekunden zurückliegen;
+der Client muss einen aktuellen, fehlerfreien Status liefern. Dies belegt
+weiterhin nicht, dass die Werkzeuge in einem konkreten AI-Chat geladen sind.
+
+**Für diese Erweiterung Controller und Bridge aktualisieren und die Bridge
+einmal neu starten.** Bei einer alten Bridge ohne Updatefunktion die neue
+Python-Datei herunterladen und anschließend mit dem bisherigen Bridge-Startbefehl
+und demselben State-Verzeichnis starten. Fingerprint, Kopplung und gespeicherte
+Tunnelwerte werden dabei weiterverwendet. [Ablauf und Grenzen](doc/RELEASE_V0.9.18.md).
 
 ### Frühere Terminalbefehle mit Pfeiltasten aufrufen
 

@@ -44,13 +44,13 @@ from types import MappingProxyType
 # Kanonische Version (Journal 8.10.: jede ausgelieferte Codeaenderung erhoehrt
 # mindestens den Patch-Stand). BRIDGE_SERVER_INFO pflegt eine separate Kopie im
 # Bridge-Block; ein Konsistenztest pinnt beide auf denselben Wert.
-APP_VERSION = "0.9.17"
+APP_VERSION = "0.9.18"
 
 
 # Single canonical UI/CLI version. The embedded bridge block keeps its own copy in
 # BRIDGE_SERVER_INFO; a consistency test pins both to the same value (Journal #88ff:
 # every delivered program state bumps at least the patch digit).
-APP_VERSION = "0.9.17"
+APP_VERSION = "0.9.18"
 
 
 def _load_bridge_component(namespace=None):
@@ -4261,6 +4261,7 @@ class RemoteTunnelProbe:
     ends any silent waiting honestly."""
 
     OVERALL_TIMEOUT = 300
+    POLL_INTERVAL = 5
 
     def __init__(self, core, instance, config=None):
         self.core, self.instance = core, instance
@@ -4299,9 +4300,11 @@ class RemoteTunnelProbe:
                     self.emit("error", str(exc))
                     return
                 self.emit("status", value)
-                if value["phase"] in {"connected", "error"}:
+                if value["phase"] == "connected":
+                    started = time.monotonic()  # Keep observing healthy sessions; bound unconfirmed recovery.
+                if value["phase"] == "error":
                     return
-                wait = 2 if value["phase"] in {"configured", "installing"} else 5
+                wait = 2 if value["phase"] in {"configured", "installing"} else self.POLL_INTERVAL
                 if self.stop.wait(wait):
                     return
         finally:
@@ -5150,6 +5153,8 @@ class AppCore:
                     self.bridge_generation += 1
                     self.bridge_instance = value
                     self.bridge_state, self.bridge_error = "CONNECTED", None
+                    if self.bridge_profile.mode == "REMOTE":
+                        self.begin_tunnel_probe()
                     # A queued item remains locally unreviewed; new review binds anew.
                 elif kind == "disconnected":
                     self._invalidate_bridge_review()
@@ -6740,6 +6745,7 @@ class ConnectionDialog:
             "runtime_tunnel_not_found": "Tunnel nicht gefunden oder für diesen Key nicht sichtbar (404). Tunnel-ID und Platform-Organisation prüfen.",
             "runtime_rate_limited": "OpenAI begrenzt die Anfragen (429). Später erneut versuchen; keine neuen Werte gespeichert.",
             "runtime_network_unavailable": "Client erreicht die OpenAI-Control-Plane nicht erfolgreich. Internetzugang zu api.openai.com:443 prüfen.",
+            "runtime_poll_stale": "Der letzte erfolgreiche Tunnelkontakt ist veraltet. Der Client muss einen aktuellen Kontakt bestätigen.",
             "client_health_unsupported": "Client liefert keinen unterstützten Nachweis erfolgreichen Pollings. Offiziellen Tunnel-Client ab v0.0.15 verwenden; keine Credentials gespeichert.",
             "client_health_unavailable": "Lokaler Client liefert keinen erfolgreichen Statusnachweis. Laufzeit prüfen und erneut testen; noch keine dauerhafte Speicherung.",
             "local_setup_timeout": "Verbindungstest nicht rechtzeitig erfolgreich. Netzwerk, Tunnel-ID und Tunnels Read + Use prüfen; keine neuen Werte gespeichert.",
@@ -9795,7 +9801,7 @@ BRIDGE_RETENTION = 24 * 3600
 BRIDGE_OUTPUT_LIMIT = 64 * 1024
 BRIDGE_BLOCK_SIZES = ("SINGLE", "SMALL", "MEDIUM", "LARGE")
 BRIDGE_VERSIONS = ("2026-07-28", "2025-11-25", "2025-06-18", "2025-03-26")
-BRIDGE_SERVER_INFO = {"name": "admin-in-the-loop", "version": "0.9.17"}
+BRIDGE_SERVER_INFO = {"name": "admin-in-the-loop", "version": "0.9.18"}
 BRIDGE_BASE32 = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 # M9 Folgeaenderung (Operator-Journal 100): pairing-code validity 10 minutes; the
 # attempt limit (5), claim-path cooldown and the separate PAIR_PENDING token lifetime
@@ -11207,8 +11213,8 @@ class BridgeTunnel:
     The Runtime Key is persisted 0600 inside the protected state directory and is
     never returned in status, logs, argv or diagnostics. GET /v1/tunnel/status is
     pure observation: it only reads bounded state and advances the start/health
-    poll; it never starts, retries or rotates anything by itself. A deliberate PUT
-    /v1/tunnel/config is the only write path; it hands one bounded setup worker
+    poll; it never starts, retries or rotates anything by itself. Configuration PUT
+    and an authenticated controller confirmation can hand one bounded setup worker
     over: locate a compatible official client (>= 0.0.15) or - on Linux amd64/
     arm64 - install the pinned official release into the state directory (HTTPS,
     redirect allowlist, SHA-256 pin, member allowlist, 0700/0600, no sudo, no
@@ -11229,6 +11235,10 @@ class BridgeTunnel:
     DOWNLOAD_TIMEOUT = 120.0
     START_DEADLINE = 120.0
     DETAIL_LIMIT = 200
+    HEALTH_MAX_AGE = 90
+    RECONNECT_COOLDOWN = 30
+    RECOVERABLE_ERRORS = {"tunnel_process_exited", "tunnel_status_timeout", "tunnel_client_start_failed",
+                          "client_health_unavailable", "runtime_network_unavailable", "runtime_poll_stale"}
     STEP_LABELS = {"check": "offiziellen Client am Bridge-Standort prüfen",
                    "download": "offizielles Release von GitHub laden (SHA-256-geprüft)",
                    "install": "Client ins Bridge-State-Verzeichnis installieren (ohne sudo)",
@@ -11237,13 +11247,14 @@ class BridgeTunnel:
                    "wait": "Verbindung zur Platform abwarten (Poll alle fünf Sekunden)",
                    "done": "Tunnel verbunden"}
 
-    def __init__(self, directory, spawn=None, now=time.monotonic):
+    def __init__(self, directory, spawn=None, now=time.monotonic, wall_now=time.time):
         self.directory = Path(directory)
         self.config_path = self.directory / "tunnel.json"
         self.mcp_url = None
         self.ai_token_path = None
         self.spawn = spawn or subprocess.Popen
         self.now = now
+        self.wall_now = wall_now
         self.lock = threading.RLock()
         self.config = None
         self.process = None
@@ -11257,6 +11268,8 @@ class BridgeTunnel:
         self.step = ""
         self.worker = None
         self.worker_cancel = None
+        self.recovery_needed = False
+        self.reconnect_at = float("-inf")
         self._load()
 
     # -- configuration -----------------------------------------------------
@@ -11336,6 +11349,7 @@ class BridgeTunnel:
         self.phase, self.detail = phase, detail
         if phase == "connected":
             self.step = "done"
+            self.recovery_needed = False
         elif phase in {"error", "configured"}:
             self.step = ""
         if changed:
@@ -11369,7 +11383,13 @@ class BridgeTunnel:
         except (BridgeError, OSError, subprocess.SubprocessError):
             return False
 
-    def _start_worker(self):
+    def controller_connected(self):
+        """An authenticated confirm requests one fresh check, never a new pairing or config."""
+        with self.lock:
+            self.checked_at = float("-inf")
+            self._start_worker(recheck=True)
+
+    def _start_worker(self, recheck=False):
         with self.lock:
             if self.config is None or self.mcp_url is None or self.ai_token_path is None:
                 return
@@ -11377,9 +11397,31 @@ class BridgeTunnel:
                 return
             self.worker_cancel = threading.Event()
             cancel = self.worker_cancel
-            self.worker = threading.Thread(target=self._advance, args=(cancel,),
+            self.worker = threading.Thread(target=self._reconnect if recheck else self._advance, args=(cancel,),
                                            name="aitl-tunnel-setup", daemon=True)
             self.worker.start()
+
+    def _reconnect(self, cancel):
+        with self.lock:
+            if cancel.is_set():
+                return
+            bridge_console("Tunnelprüfung nach bestätigtem Controller-Kontakt")
+            self._refresh(force=True)
+            if self.phase in {"connected", "missing", "installing"}:
+                return
+            if self.phase == "starting" and not self.recovery_needed:
+                return  # An existing startup keeps its original bounded attempt.
+            if self.phase == "starting" and self.detail not in self.RECOVERABLE_ERRORS:
+                return  # Respect provider throttling instead of restarting into it.
+            if self.phase == "error" and self.detail.split(":", 1)[0] not in self.RECOVERABLE_ERRORS:
+                return  # Credentials, permissions, unsupported clients and install errors need local repair.
+            if self.now() < self.reconnect_at:
+                return
+            self.reconnect_at = self.now() + self.RECONNECT_COOLDOWN
+            bridge_console("Tunnel-Wiederanlauf mit gespeicherter Konfiguration")
+            self._transition("configured")
+        if not cancel.is_set():
+            self._advance(cancel)
 
     def _stop_worker(self):
         worker, cancel = self.worker, self.worker_cancel
@@ -11518,6 +11560,10 @@ class BridgeTunnel:
             os.close(dfd)
 
     def _spawn(self, binary, cancel):
+        with self.lock:
+            self._spawn_locked(binary, cancel)
+
+    def _spawn_locked(self, binary, cancel):
         if cancel.is_set():
             return
         self._step("start", cancel)
@@ -11551,6 +11597,7 @@ class BridgeTunnel:
             self._transition("error", "tunnel_client_start_failed" + ((": " + tail) if tail else ""))
             return
         self.work = work
+        self.recovery_needed = False
         self.deadline = self.now() + self.START_DEADLINE
         self.checked_at = 0.0
         self._transition("starting")
@@ -11622,7 +11669,7 @@ class BridgeTunnel:
             return {"version": 1, "phase": self.phase, "detail": self.detail[:self.DETAIL_LIMIT],
                     "step": self.step}
 
-    def _refresh(self):
+    def _refresh(self, force=False):
         if self.phase == "missing":
             return
         if self.process is not None and self.process.poll() is not None:
@@ -11630,13 +11677,13 @@ class BridgeTunnel:
             tail = self._safe_tail()
             self._transition("error", "tunnel_process_exited" + ((": " + tail) if tail else ""))
             return
-        if self.phase != "starting":
+        if self.phase not in {"starting", "connected"}:
             return
-        if self.deadline is not None and self.now() > self.deadline:
+        if self.phase == "starting" and self.deadline is not None and self.now() > self.deadline:
             self._stop_process()
             self._transition("error", "tunnel_status_timeout")
             return
-        if self.now() - self.checked_at < 0.5:
+        if not force and self.now() - self.checked_at < (5 if self.phase == "connected" else 0.5):
             return
         self.checked_at = self.now()
         accepted, failure = self._health()
@@ -11646,7 +11693,13 @@ class BridgeTunnel:
                          "client_health_unsupported"}:
             self._stop_process()
             self._transition("error", failure)
-        elif failure:
+        elif failure or self.phase == "connected":
+            failure = failure or "client_health_unavailable"
+            if self.phase == "connected":
+                self.recovery_needed = True
+                self.deadline = self.now() + self.START_DEADLINE
+                self._transition("starting", failure)
+                self.step = "wait"
             self.detail = failure  # Transient: bounded waiting continues until the deadline.
 
     def _health(self):
@@ -11692,14 +11745,15 @@ class BridgeTunnel:
         if isinstance(success, str) and len(success) <= 64:
             try:
                 observed = datetime.fromisoformat(success.replace("Z", "+00:00"))
-                valid_success = observed.tzinfo is not None
-            except ValueError:
+                valid_success = observed.tzinfo is not None and -30 <= self.wall_now() - observed.timestamp() <= self.HEALTH_MAX_AGE
+            except (ValueError, OverflowError):
                 pass
-        accepted = (value.get("status") == "ok" and valid_success
+        accepted = (value.get("status") == "ok" and valid_success and type(status) is int and 200 <= status < 300
                     and type(details.get("consecutive_failures")) is int
                     and details["consecutive_failures"] == 0)
         failure = ("runtime_rate_limited" if status == 429
-                   else "runtime_network_unavailable" if details.get("failure_category") else None)
+                   else "runtime_network_unavailable" if details.get("failure_category")
+                   else "runtime_poll_stale" if not valid_success else None)
         return accepted, failure
 
     def close(self):
@@ -11935,6 +11989,7 @@ class BridgeService:
         check(type(value["version"]) is int and value["version"] == 1)
         confirmed = self.store.confirm(token)
         bridge_console("Controller-Kontakt: Kopplung bestaetigt (controller %s)" % confirmed["controller_id"])
+        self.tunnel.controller_connected()
         return self.json(confirmed)
 
     def mcp(self, request):

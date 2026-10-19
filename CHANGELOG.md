@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.9.18 — Tunnel nach Controller-Kontakt frisch prüfen
+
+- Der authentifizierte Controller-Confirm stößt im Hintergrund einen frischen
+  Healthcheck des Bridge-eigenen Tunnels an. Ein gesunder Client bleibt bestehen;
+  bei behebbaren Fehlern gibt es einen begrenzten Wiederanlauf mit der gespeicherten
+  Konfiguration, maximal einmal innerhalb von 30 Sekunden. Keine neue Kopplung,
+  kein Auslesen oder Zurückgeben des Runtime Keys und keine Terminalaktion.
+- Ein früheres „connected“ wird weiter geprüft. Der Control-Plane-Erfolg muss
+  aktuell sein (höchstens 90 Sekunden alt), fehlerfrei und zu einem erfolgreichen
+  HTTP-Status gehören. Der Controller beobachtet den Remote-Tunnel nach dem
+  ersten Erfolg weiter; GET-Statusabfragen starten selbst keinen Client.
+- Key-/Rechtefehler, nicht gefundene Tunnel, Provider-Drosselung und nicht
+  unterstützte Clients lösen keinen solchen Wiederanlauf aus. Abbruch/Beenden
+  verhindert einen verspäteten Start. Bereits laufender Start und wiederholte
+  Bestätigungen erzeugen keine parallelen Clients.
+- Die Bridge muss für diese Änderung ebenfalls aktualisiert und mit bestehendem
+  State-Verzeichnis neu gestartet werden. Tunnelstatus ist weiterhin kein Beleg
+  für geladene Werkzeuge in einem konkreten Chat.
+
+Prüfnachweis und Bezug: [v0.9.18](doc/RELEASE_V0.9.18.md).
+
 ## 0.9.17 — Pfeiltasten-History im Terminal
 
 - Das interaktive Terminal nutzt die bestehende Bash-/Readline-History: Pfeil
