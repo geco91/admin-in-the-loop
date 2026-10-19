@@ -1,4 +1,4 @@
-# Admin in the Loop – v0.9.5 (persönliche Testversion)
+# Admin in the Loop – v0.9.15 (persönliche Testversion)
 
 **AI assists, Admin decides.**
 
@@ -8,7 +8,11 @@ Stand des beschriebenen MVP: 30. September 2026. Die bisherige lokale Integratio
 
 ## Versionen und Versionsregel
 
-Kanonische Version: `APP_VERSION` in `admin_in_the_loop.py` (aktuell **0.9.5**); die headless Bridge zeigt dieselbe Version (`BRIDGE_SERVER_INFO`, Konsolen-Startzeile) und der GUI-Fenstertitel führt sie ebenfalls. Jeder neue ausgelieferte Programmstand erhöht mindestens den Patch-Stand (keine undokumentierten Stände); `--version` gibt die Version zeilenweise aus. Tests pinnen die Konsistenz beider Kopien.
+Kanonische Version: `APP_VERSION` in `admin_in_the_loop.py` (aktuell **0.9.15**); die headless Bridge zeigt dieselbe Version (`BRIDGE_SERVER_INFO`, Konsolen-Startzeile) und der GUI-Fenstertitel führt sie ebenfalls. Jeder neue ausgelieferte Programmstand erhöht mindestens den Patch-Stand (keine undokumentierten Stände); `--version` gibt die Version zeilenweise aus. Tests pinnen die Konsistenz beider Kopien.
+
+Einzeldatei-Download und `update [GITHUB_USER [BRANCH]]` stehen im
+[Root-README](../README.md#einfach-aktualisieren). Standard ist GeektankLabs/main;
+für den hier veröffentlichten Entwicklungsstand `update geco91` verwenden.
 
 ## Dateien und Architektur
 
@@ -16,7 +20,7 @@ Kanonische Version: `APP_VERSION` in `admin_in_the_loop.py` (aktuell **0.9.5**);
 |---|---|
 | `admin_in_the_loop.py` | Einziger Python-Anwendungseinstieg: Controller, GUI, PTY-Helfer, Netzwerkclient, Tunnelsteuerung, Bridge-only-Modus und 49 bestehende Selbsttests |
 | `test_connected_mvp.py` | HTTP-, MCP-, TLS-, PTY-, Wiederverbindungs- und Tunneltests |
-| `gui_smoke_test.py` | Ein echter Tkinter-/xterm-Test unter einem virtuellen Linux-Display |
+| `gui_smoke_test.py` | Tkinter-/XFCE-Terminal-Tests unter einem virtuellen Linux-Display |
 | `../doc/Admin-in-the-Loop_Konzept_V0.7.md` | Maßgebliche Produkt-/Konzeptreferenz; keine laufende Aufgabenliste |
 | `../IMPLEMENTATION_STATUS.md` | Historischer Implementierungs-/Evidenzstand vom 30. September 2026; kein aktiver Backlog |
 | `../doc/TASKBOARD_PROPOSAL.md` | Historische Migrationsrationale und Ticket-ID-Querverzeichnis; kein aktiver Backlog |
@@ -27,10 +31,15 @@ Die GUI und lokale Tests verwenden denselben `AppCore`. Das ist eine lokale Prog
 
 ## Voraussetzungen und Start
 
+Für die optionale lokale AI→Terminal-Commandanalyse siehe
+[sh-guard: Aktivierung, Installation und Prüfnachweise](../doc/SH_GUARD.md).
+Nach bewusster Aktivierung wird die Einstellung gespeichert; die menschliche
+Freigabe bleibt für jeden Transfer erforderlich.
+
 Unix, Python **3.11 oder neuer**, Bash. Debian-Pakete für den Controller mit GUI:
 
 ```bash
-sudo apt install python3 python3-tk xterm
+sudo apt install python3 python3-tk xfce4-terminal
 python3 admin_in_the_loop.py
 ```
 
@@ -54,6 +63,7 @@ Das Controllerfenster startet groß im Querformat. **F11** schaltet Vollbild, **
 
 - Links Terminalstatus und Ausgabeauswahl; in der Mitte der große Review; rechts AI-/MCP-Verbindung und Vorschlagsstatus. Gerahmte Arbeitsbereiche mit ungefähr **1:2:1** Breitenverhältnis; die Seitenbereiche sind gleich gestaltet, der mittlere Review ist der primäre Arbeitsbereich.
 - „Terminal öffnen“ und „Verbindung einstellen“ stehen oben auf gleicher Höhe. Beide Prüfen-Buttons und Freigeben/Verwerfen stehen unten auf einer gemeinsamen Zeile.
+- Die Prüfauswahl steht unmittelbar über dem jeweiligen Prüfen-Button: links „Rückgabeprüfung“, rechts „Befehlsprüfung“. Zeichenprüfung und Einstellungen sind pro Richtung unabhängig gespeichert; sh-guard steht nur für Befehle bereit. In der Mitte bleiben Code/Ausgabe und die aktivierten, zur Richtung passenden Prüfreiter. [Beispielbilder und Prüfnachweis](../doc/REVIEW_LAYOUT.md).
 - Keine Inhaltsvorschau in den Seitenbereichen. Grün signalisiert einen vorhandenen Vorschlag, Orange einen leeren Platz. Die Farbe bewertet keine Sicherheit. Erst „Prüfen“ übernimmt den Vorschlag in den Review und leert den lokalen Platz.
 - Der Review hat weiche Zeilenumbrüche und ausschließlich eine vertikale Scrollbar. Die Umbrüche verändern den übertragenen Text nicht.
 - „Finales Return senden“ erscheint nur bei Commands. Beim ersten Start eingeschaltet, danach persistent nach Benutzerwahl. Interne Zeilenumbrüche können schon ohne finales Return Befehle ausführen; die Oberfläche weist darauf hin.
@@ -71,15 +81,23 @@ Probelauf ohne AI:
 
 Textbearbeitung über das Kontextmenü des Reviews oder **Ctrl+E**, auf macOS zusätzlich **Cmd+E**. Die Übernahme aus dem Editor erzeugt eine neue Review-ID. Die Hauptfläche bleibt ein fester, schreibgeschützter Snapshot.
 
+„Prüfen“ lädt die aktuelle Terminalausgabe auch dann erneut, wenn bereits eine
+Rückgabeprüfung offen ist oder eine frühere Rückgabe bestätigt wurde. Eine offene
+Ausgabeprüfung wird durch einen frischen Snapshot ersetzt; unfreigegebene Edits
+werden dabei verworfen. Jede Rückgabe benötigt ihre eigene lokale Prüfung und
+Freigabe und bleibt derselben Submission zugeordnet. Der Command wird dabei
+nicht erneut gesendet. Auswahlmodus, Puffer-/Größenlimits und Ablauf der
+Submission bleiben wirksam; es gibt keinen automatischen Deltafilter.
+
 ### Exakte Bytes, Normalisierung und lokale Zwischenablage
 
 - **„Bytes / Codepoints…“** zeigt ausschließlich den finalen eingefrorenen UTF-8-Snapshot: Byteoffsets, Hexbytes, Codepoints und sichere JSON-Zeichennotation, mit Review-ID/Revision/Richtung/finalem Return. Ein neuer Review, eine Bearbeitung, ein Return-/Session-/Bindingwechsel oder Ablauf kennzeichnet die alte Ansicht als **nicht mehr aktuell**; deren Vollsnapshot-Copy wird gesperrt. Die Ansicht führt nichts aus und erteilt keine Freigabe.
 - Die Review-Kopfzeile zeigt transiente Zählwerte für **CRLF→LF**, **CR→LF**, entfernte Schluss-LF und das aktuelle finale Return. Es wird kein ursprünglicher Commandtext archiviert. Bestehende Normalisierung, Unicode und finale Payloadbytes bleiben unverändert; neue Bearbeitung erzeugt neue Hinweise für die neue Revision. Output wird nicht als Command normalisiert.
 - Ausgewählten Reviewtext mit **Ctrl+C** (macOS **Cmd+C**) oder **„Auswahl kopieren“** im Kontextmenü lokal kopieren. Bei ganzen Zeichen kopiert die App den zugehörigen Originaltext statt synthetischer `↵`-/Codepointnotation. Softwrap ist kein Datennewline. Eine Auswahl mitten in einer Zeichennotation wird mit Hinweis abgelehnt und lässt die Zwischenablage unverändert; ganze Zeichen wählen oder in der Detailansicht bewusst **„Finalen Snapshot exakt kopieren“**. Details-/Diagnosetabellen kopieren ihre sichtbare Notation.
-- Editierbare Textfelder/Entries behalten native Paste (**Ctrl+V**, macOS **Cmd+V**); readonly Review-/Output-/Detailflächen bleiben schreibgeschützt. Chatcode-Copy bleibt bewusst bedient und an gültigen/frischen Status gebunden. Keine automatische Freigabe, Submission, Outputweitergabe oder Secretprotokollierung durch Copy/Paste.
-- Das **separate Systemterminal** behält seine eigenen Clipboardwege: typischerweise **Ctrl+Shift+C/V** im Debian-xterm, **Cmd+C/V** in Terminal.app oder dessen Kontextmenü. **Ctrl+C bleibt Terminal-SIGINT**; die Tk-Copybindungen gelten nur für Tk-Textwidgets. Terminalcopy ist die native sichtbare Auswahl, keine Roh-PTY-Byteaufnahme. Vorhandene OS-Clipboardhistorie ist eine lokale Betriebssystemgrenze.
+- Alle Eingabefelder (auch nachträglich geöffnete Setup-Dialoge, Comboboxen und Spinboxen) haben per Rechtsklick **Kopieren / Einfügen**. Maskierte Felder kopieren nach bewusster Auswahl den tatsächlichen Wert. Nicht editierbare Felder sperren Paste. Editierbare Textfelder behalten native Paste (**Ctrl+V**, macOS **Cmd+V**). **Einfügen im Code-/Ausgabereview** öffnet den bestehenden Bearbeitungsdialog mit dem Clipboardtext an der angeklickten Stelle bzw. statt der Auswahl. Erst „Übernehmen“ ändert den Review und erzeugt eine neue Revision; alte Freigaben werden nicht wiederverwendet. Detailflächen bleiben schreibgeschützt. Chatcode-Copy bleibt bewusst bedient und an gültigen/frischen Status gebunden. Keine automatische Freigabe, Submission, Outputweitergabe oder Secretprotokollierung durch Copy/Paste.
+- Das **separate Systemterminal** verwendet unter Linux **XFCE Terminal** mit nativem Rechtsklickmenü **Copy / Paste** (je nach Sprache Kopieren / Einfügen) und **Ctrl+Shift+C/V**. Auf macOS bleibt Terminal.app mit seinem Kontextmenü und **Cmd+C/V** zuständig. Fehlt XFCE Terminal, zeigt die App den Hilfsbefehl zur Ausführung in einem vorhandenen Systemterminal. Manuelles Terminal-Paste bleibt manuelle Eingabe: enthaltene Zeilenumbrüche können dort wie bei Tastatureingabe Commands ausführen. **Ctrl+C bleibt Terminal-SIGINT**; die Tk-Copybindungen gelten nur für Tk-Textwidgets. Terminalcopy ist die native sichtbare Auswahl, keine Roh-PTY-Byteaufnahme. Vorhandene OS-Clipboardhistorie ist eine lokale Betriebssystemgrenze.
 
-Native Acceptance separat mit ausschließlich synthetischen Token-/Unicode-/Multiline-Fixtures: reales Debian/PBS-Clipboard, Terminal-SIGINT und macOS-Clipboard/Terminal.app. Xvfb/Tk/xterm-Fixtures sind lokale Regression, **kein nativer Debian-PBS-/Mac-PASS**. Hosted-/Tunnel-/SSH-Zielnachweise bleiben eigenständige offene Evidenzgrenzen.
+Native Acceptance separat mit ausschließlich synthetischen Token-/Unicode-/Multiline-Fixtures: reales Debian/PBS-Clipboard, Terminal-SIGINT und macOS-Clipboard/Terminal.app. Xvfb/Tk/Terminal-Fixtures sind lokale Regression, **kein nativer Debian-PBS-/Mac-PASS**. Hosted-/Tunnel-/SSH-Zielnachweise bleiben eigenständige offene Evidenzgrenzen.
 
 ## Lokale Bridge und OpenAI-Tunnel
 
@@ -93,7 +111,18 @@ Native Acceptance separat mit ausschließlich synthetischen Token-/Unicode-/Mult
 
 **„Verbindung bereit · Tunnel-Zugriff geprüft“** erscheint ausschließlich im belegten Local-Setup: lokale Bereitschaft und beim Setup beobachtetes authentifiziertes Polling. Es beweist weder die richtige ChatGPT-App-/Workspace-Zuordnung noch einen ChatGPT-Round-Trip oder kontinuierlich gültige Berechtigungen. Der permanente Round-Trip-Zusatz entfällt im Normalstatus; die gezielte Prüfanleitung bleibt im Verbindungsdialog verfügbar. Remote zeigt statt eines unbeobachteten Tunnelchecks die **tatsächlich beobachtete Tunnelphase der Bridge** („Tunnelstatus wird geprüft“, „Tunnel fehlt · Einrichtung nötig“, „Tunnel startet · Verbindung wird geprüft“, „Tunnel verbunden“, „Tunnel-Fehler“ mit konkretem Grund); die frühere Blankett-Zeile „Tunnelbetrieb am Gateway“ entfällt. Die zugrunde liegende `/readyz`-Antwort alleine bleibt nur lokale Bereitschaft. Im normalen gültigen Chatcodezustand entfallen permanente Frist-/Weitergabehinweise; Ablauf, stale Status, Sperre, Backoff und Disconnect bleiben konkret sichtbar. Rotation bleibt manuell.
 
-Die Einrichtung bleibt in einem einzigen, größenveränderbaren und vertikal scrollbaren Dialog. Local zeigt den Zwei-Werte-Flow; Remote behält seine Bridge-/Gateway-/Pairing-Details. Seit W4 gibt es drei eindeutige Verbindungsarten: „Auf diesem System / in diesem Qube", „Anderer Qube — über Qrexec" (nur bei erkanntem Qubes) und „Remote — über HTTPS" (freies Ziel, auch auf Qubes immer verfügbar). Es gibt keine Setup-Reiter oder Next/Back-Seiten. Erneutes Öffnen verwendet das bestehende Fenster. Schließen beendet nur das Einstellungsfenster; eine gestartete Einrichtung/Kopplung oder Verbindung läuft weiter. Ergebnisse und Fehler bleiben im Dialog sichtbar.
+Die Einrichtung bleibt in einem einzigen, größenveränderbaren Dialog. Bridge,
+Secure Tunnel und Chatstatus stehen dauerhaft im Kopf; der aktuelle Schritt
+scrollt unabhängig von Zurück, Fortschritt und Schließen. Drei Verbindungsarten
+stehen zur Wahl: lokal, anderes Qube per Qrexec (nur auf Qubes) und externe
+HTTPS-Bridge. Qubes führt durch fünf Schritte. Gespeicherte Verbindungen werden
+beim App-Start automatisch mit vorhandener Vertrauensbindung wiederhergestellt;
+die eigene Qrexec-Weiterleitung wird im Hintergrund vorbereitet. Eine neue
+Kopplung oder Code-Rotation erfolgt dadurch nicht. Bei Problemen zeigt der
+Dialog Wiederholung und die Startanleitung mit den gespeicherten Werten.
+Erneutes Öffnen verwendet das bestehende Fenster; Schließen lässt Verbindungen
+bestehen. Der vollständige Ablauf mit als Beispiele markierten Qubes-Renderings
+steht in [CONNECTION_UX.md](../doc/CONNECTION_UX.md).
 
 **Installationsfehler diagnostizieren:** Unter der Fehlermeldung steht jetzt eine kurze Ursache; „Technische Details anzeigen“ öffnet im gleichen Fenster eine schreibgeschützte, vertikal scrollbare Diagnose mit Phase, Subprozess/Komponente, Installationsziel, Exit-Code/Exception und gekürzter/redigierter stdout-/stderr-Ausgabe. Dieselbe Diagnose erscheint auf stderr in der Konsole des Python-Starts. API-Keys/Tokens und credentialartige Zeilen werden vor der Ausgabe entfernt. Der Hinweis beim Schließen ist weiterhin nur eine Lifecycle-Erklärung, keine Fehlerdiagnose.
 
@@ -166,7 +195,7 @@ Ein Command wird erst nach der lokalen Freigabe und der Prüfung im PTY-Helfer g
 
 Sichtbar ist die sichere Darstellung des tatsächlich übertragenen Textes: echte LF mit Marker, Nicht-ASCII-/Steuerzeichen mit eindeutiger Notation. Darstellungsmarker werden nicht übertragen. Im Review steht ein eingefrorener Snapshot; die UI rekonstruiert keinen Command aus gerenderten Zeichen.
 
-Der Output-Sanitizer verarbeitet UTF-8 und Terminalsequenzen über Chunkgrenzen hinweg. ANSI-/OSC-/DCS-Inhalte werden als Daten behandelt und aus der Auswahlprojektion entfernt; ungültige oder unvollständige Daten werden kenntlich gemacht. Im Linux-xterm-Launcher sind Terminalfunktionen zur Änderung von Clipboard, Fenstern, Fonts, Titeln und weiteren Ressourcen deaktiviert. OSC-52-Clipboard-Manipulation wurde praktisch geprüft. Terminal.app ist nicht entsprechend abgenommen.
+Der Output-Sanitizer verarbeitet UTF-8 und Terminalsequenzen über Chunkgrenzen hinweg. ANSI-/OSC-/DCS-Inhalte werden als Daten behandelt und aus der Auswahlprojektion entfernt; ungültige oder unvollständige Daten werden kenntlich gemacht. Der Linux-Launcher verwendet XFCE Terminal mit festem Fenstertitel. Der bestehende OSC-52-Clipboard-Canary-Test besteht mit diesem Terminal; die früheren xterm-Ressourcenflags werden nicht auf VTE übertragen. Native Copy/Paste-Mausaktionen wurden zusätzlich unter Xvfb ausgeführt. Terminal.app ist nicht entsprechend abgenommen.
 
 Auswahlbereiche sind **Beobachtungsintervalle**, keine beweisbare Command-Ergebnisse. Der Marker entsteht beim Transfer, nicht beim erkannten Abschluss. SSH, Hintergrundjobs, interaktive Programme und manuelle Eingaben können darin gemischte Ausgaben erzeugen. Die Prompt-/Bereitschaftserkennung ist eine **großzügige, ehrliche Klassifikation** des sichtbaren Eingabe-Endes (nach passiver Normalisierung von CSI-/OSC-/CR-/Backspace-Resten): Sie liefert die Klassen Prompt, Passwort-/Passphrase-Abfrage, Fortsetzung (`>`/PS2-artig) oder unklar. Sie **beweist keine Ausführbarkeit** und blockiert die explizite menschengereviewte Freigabe nie – ein zweiter Klick existiert bewusst nicht mehr; die einzige Sperre vor dem Senden bleibt die bewusste Freigabe selbst plus die getrennten Zustellungs-Interlocks (uncertain/open_return). Ein als Prompt klassifiziertes Ende kann trotzdem ein Programm-Prompt sein (dokumentierte False-Positive-Klasse).
 
@@ -285,7 +314,7 @@ AITL_TEST_TUNNEL_BINARY=/voller/pfad/tunnel-client-runtime python3 tests/test_lo
 GUI-Smoke-Test unter einem virtuellen Linux-Display, weiterhin mit Python-`unittest`:
 
 ```bash
-sudo apt install xvfb xauth xterm python3-tk
+sudo apt install xvfb xauth xfce4-terminal python3-tk
 xvfb-run -a -s '-screen 0 1920x1080x24' python3 tests/gui_smoke_test.py
 ```
 

@@ -16,25 +16,91 @@ weitergegeben. Das Terminal bleibt unabhängig manuell bedienbar.
 
 ## Aktuelle persönliche Testversion
 
-**v0.9.0 ist lokal als reguläre persönliche Testversion festgeschrieben; nicht
-veröffentlicht.** Der Operator hat am 4. Oktober 2026 den geprüften und integrierten
-Mainstand für seine eigenen Tests angenommen. Weitere externe Vorab-Abnahmen sind
-kein Gate für diesen Versionsstand. Änderungen stehen im [Changelog](CHANGELOG.md).
+**Aktuelle persönliche Testversion: v0.9.15 mit Download und ausdrücklichem Selbstupdate.**
+Links im Terminalbereich wird die Rückgabeprüfung eingestellt, rechts im AI-Bereich
+die Befehlsprüfung. Die Mitte bleibt für Code/Ausgabe und die passenden Prüfreiter
+mit Ampel und Befundzahl frei. [Echte Beispielansichten](doc/REVIEW_LAYOUT.md).
+Der Stand bündelt außerdem sh-guard, überarbeitete Verbindungseinrichtung,
+erneutes Prüfen desselben Command-Outputs und Maus-Kontextmenüs. Änderungen
+stehen im [Changelog](CHANGELOG.md).
+
+## Herunterladen und ausprobieren
+
+[Python-Datei v0.9.15 herunterladen](https://raw.githubusercontent.com/geco91/admin-in-the-loop/refs/tags/v0.9.15/admin_in_the_loop.py) ·
+[Gesamtes Repository als ZIP](https://github.com/geco91/admin-in-the-loop/archive/refs/tags/v0.9.15.zip)
+
+Die einzelne Python-Datei genügt für die Anwendung; Tests und Dokumentation
+liegen zusätzlich im ZIP. In einem eigenen, leeren Verzeichnis herunterladen:
+
+```bash
+curl --fail --location --proto '=https' --tlsv1.2 \
+  https://raw.githubusercontent.com/geco91/admin-in-the-loop/refs/tags/v0.9.15/admin_in_the_loop.py \
+  --output admin_in_the_loop.py
+python3 admin_in_the_loop.py
+```
+
+Python ≥ 3.11, Tkinter und XFCE Terminal müssen vorhanden sein; für Remote-TLS
+zusätzlich `cryptography`. Debian-Paketbefehle stehen unter [Voraussetzungen](#voraussetzungen).
+Unter Qubes wird die Controller-App im vorgesehenen App-Qube gestartet.
+
+## Einfach aktualisieren
+
+App schließen, dann im Verzeichnis der heruntergeladenen Datei ausführen:
+
+```bash
+# Original-Repository GeektankLabs, main
+python3 admin_in_the_loop.py update
+
+# Fork, weiterhin main — für diesen Entwicklungsstand geco91 verwenden
+python3 admin_in_the_loop.py update geco91
+
+# Ausdrücklich einen Entwicklungsbranch dieses Forks ausprobieren
+python3 admin_in_the_loop.py update geco91 feature/mein-branch
+```
+
+`--update` funktioniert genauso wie `update`. Ohne Nutzernamen gilt immer
+`GeektankLabs/admin-in-the-loop`; der Repo-Name bleibt gleich. Ohne Branch gilt
+`main`. Die Quelle wird nicht dauerhaft umgestellt: Für weitere Updates aus
+einem Fork dessen Namen wieder angeben. Der Entwicklungsbranch muss existieren.
+
+Das Update prüft Python-Syntax sowie übereinstimmende App-/Bridge-Versionen,
+führt den Download dabei nicht aus und ersetzt nur die Anwendungsdatei atomar.
+`admin_in_the_loop.py.bak` enthält die unmittelbar vorherige Datei. Gleicher
+Dateiinhalt wird nicht erneut geschrieben. Einstellungen, Verbindungen und
+installierte Prüftools werden nicht überschrieben. App und gegebenenfalls eine
+separat laufende Bridge anschließend neu starten; diese werden nicht automatisch
+beendet oder aktualisiert. Bei getrennten Qubes die jeweilige Kopie aktualisieren.
+
+Ohne ausdrücklich angegebenen Branch wird eine ältere Versionsnummer abgelehnt.
+Das Original kann hinter dem Fork liegen. Mit beiden Parametern ist auch ein
+bewusster Wechsel auf einen älteren Branch möglich. Die Python-Datei aus diesem
+Branch kann weniger Funktionen besitzen; die Sicherung erlaubt die Rückkehr.
+Updates vertrauen dem ausgewählten GitHub-Konto und Branch über HTTPS. Syntax-
+und Versionsprüfung sind keine Signaturprüfung oder Sicherheitsbewertung des Codes.
+Lokale Änderungen an der Anwendungsdatei werden im Backup gesichert und ersetzt.
+Bei einem Git-Checkout stattdessen den üblichen Git-Workflow verwenden.
+
+[Veröffentlichungsumfang und Prüfnachweis](doc/RELEASE_V0.9.15.md)
 
 Die Anwendung bleibt ein früher MVP, keine Abnahme für kritische Infrastruktur.
 „Konzept V0.7“, „MVP 0.8“ und der alte v0.0.1-Veröffentlichungsentwurf sind
-historische Stände. Die bestehende Runtime-Versionsquelle ist
-`BRIDGE_SERVER_INFO.version` in `admin_in_the_loop.py`.
+historische Stände. Die Runtime-Versionsquelle ist `APP_VERSION` in
+`admin_in_the_loop.py`; die eingebettete Bridge führt dieselbe Version separat.
 
 Hosted ChatGPT-Work, offizielles Tunnelbinary und native Desktop-Abnahmen bleiben
-offene separate Schritte (zuletzt vier externe Test-Skips). Die Mac-Vorschau ist
-nicht integriert. Der optionale sh-guard-Reviewer bleibt standardmäßig aus;
-alle realen Binary-Pins sind weiterhin `approved=False`.
+offene separate Schritte; der aktuelle Verbindungs-Prüfnachweis steht in
+[CONNECTION_UX.md](doc/CONNECTION_UX.md). Die Mac-Vorschau ist
+nicht integriert. Der optionale sh-guard-Reviewer bleibt beim Erststart aus;
+die bewusste Aktivierung wird gespeichert. Installation und lokale Analyse sind
+mit gepinnten v0.1.10-Binaries integriert; siehe [sh-guard-Anleitung und Prüfnachweise](doc/SH_GUARD.md).
 
 Der [Testbericht vom 30. September 2026](tests/MVP_0.8_TEST_REPORT.md) dokumentiert
 damalige Linux-/Ubuntu-Prüfungen. Er belegt keine aktuelle native macOS- oder
 Debian-Desktop-Abnahme und keinen echten ChatGPT-/OpenAI-Round-Trip. Eine lokale
 Bereitschaftsmeldung ist kein Nachweis, dass der gewünschte AI-Chat verbunden ist.
+
+Der [bebilderte Qubes-Verbindungsablauf](doc/CONNECTION_UX.md) zeigt die fünf Schritte,
+Wiederherstellung und Fehlerhilfe aus der aktuellen Oberfläche.
 
 ## Sicherheitsmodell in Kürze
 
@@ -51,8 +117,8 @@ Bereitschaftsmeldung ist kein Nachweis, dass der gewünschte AI-Chat verbunden i
 
 Menschliche Zustimmung ist keine Garantie für sichere Shellcommands. Commands
 können selbst Dateien lesen, löschen oder Daten versenden. Automatische
-Secret-Redaction und eine verlässliche Risikoklassifizierung sind nicht Teil
-dieses MVP. Ausgewählter Output kann Secrets enthalten; Ausgabeintervalle sind
+Secret-Redaction ist nicht integriert. Die optionale statische Commandanalyse
+unterstützt den Review, garantiert aber keine sichere Einstufung. Ausgewählter Output kann Secrets enthalten; Ausgabeintervalle sind
 keine verifizierten Commandgrenzen oder Exitcodes.
 
 Prozesse unter derselben Benutzerkennung sind keine starke Dateisystemisolation.
@@ -89,7 +155,7 @@ der Controller sie nicht sicher kennt. Beim Schließen des Controllerfensters
 | Bereich | Voraussetzungen |
 |---|---|
 | Lokaler Controller | Unix, Python ≥ 3.11, Bash, Tkinter und grafische Sitzung |
-| Linux-Terminalstart | `xterm`; Debian-Paketnamen siehe unten |
+| Linux-Terminalstart | `xfce4-terminal` mit nativem Copy/Paste-Kontextmenü; Debian-Paketnamen siehe unten |
 | macOS-Terminalstart | Terminal.app und `/usr/bin/osascript`; ggf. Automation-Erlaubnis. Native Abnahme ist nicht belegt. |
 | Lokale oder Remote-Bridge | Nur Python-Standardbibliothek im selben Python, das die Bridge startet |
 | Remote-Kopplung / TLS | Zusätzlich `cryptography` auf den beteiligten Python-Seiten |
@@ -111,7 +177,7 @@ Installer vorausgesetzt.
 Für eine Debian-Desktop-Umgebung beschreibt die bestehende Anleitung:
 
 ```bash
-sudo apt install python3 python3-tk xterm
+sudo apt install python3 python3-tk xfce4-terminal
 python3 admin_in_the_loop.py
 ```
 

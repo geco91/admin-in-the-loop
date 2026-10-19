@@ -8,6 +8,17 @@ AI-assisted terminal work, with you reviewing every command and choosing what ou
 
 Stand: 30. September 2026, Europe/Berlin. Projekt: https://github.com/GeektankLabs/admin-in-the-loop
 
+Fortschreibung 18. Oktober 2026: Für AI→Terminal ist die optionale lokale
+sh-guard-Analyse in AITL 0.9.11 mit kompakter Review-Auswahl und Statusreitern direkt in der Review-Fläche integriert. Sie ergänzt den menschlichen Review;
+Terminal→AI-Inhaltsanalyse/Redaction und automatische Freigaben sind weiterhin
+nicht enthalten. Bedienung, Pinzulassung und plattformspezifische Prüfnachweise:
+[SH_GUARD.md](SH_GUARD.md). Die übrigen MVP-0.8-Angaben behalten ihren historischen Bezug.
+
+AITL 0.9.11 ergänzt automatische Wiederherstellung gespeicherter Bridge-Verbindungen
+mit bestehender Vertrauensbindung und einen vereinfachten Verbindungsdialog.
+Der Qubes-Ablauf mit Beispielbildern und klaren Prüfnachweisgrenzen steht in
+[CONNECTION_UX.md](CONNECTION_UX.md).
+
 Die vollständig gelesene V0.7 ist die jüngste mitgelieferte Konzeptrevision: Sie ersetzt ausdrücklich V0.3 bis V0.6. Diese Fortschreibung integriert den dokumentierten MVP-0.8-Stand und die statische Repository-Inventur in dieselbe maßgebliche Konzeptdatei. Der Quelldateiname bleibt zur Kontinuität erhalten; es gibt keine konkurrierende Konzeptfassung und keine Nachtragsrangfolge. Produktziel und übernommene Nutzerentscheidungen bleiben bestehen. Die importierten Produktdateien sind derzeit unversioniert; Git enthält bislang nur `LICENSE`. Eine Veröffentlichung ist weder nachgewiesen noch durch diese Konzeptarbeit beauftragt.
 
 **Dokumentrollen:** Dieses Konzept ist die maßgebliche Produkt- und Konzeptreferenz. Alle aktive Implementierungs-, Validierungs- und Abnahmearbeit wird ausschließlich im Taskboard geführt; Ticketstatus und aktuelle Ausführungsplanung werden nicht aus Projektdateien abgeleitet. Die hier beschriebene Architektur und der Umsetzungsstand beziehen sich auf den dokumentierten MVP 0.8; eine mögliche Weiterentwicklung gilt nicht als beschlossen, solange sie nicht konzeptionell abgestimmt und hier abgebildet ist. „MVP 0.8“ bezeichnet vorhandene Implementierung beziehungsweise ausdrücklich zugeordnete historische Prüfnachweise, keine hier neu ausgeführten Tests. „Soll/offen“ beschreibt eine Produktanforderung oder den hier festgehaltenen Abnahmerahmen, nicht den aktuellen Ticketstatus. Dateien allein beweisen keine funktionierende Integration. Das verbundene lokale MVP ist implementiert; native Plattform-, echte Cloud- und Isolationsnachweise waren zum historischen Prüfstichtag teilweise offen. Es liegt keine Sicherheitsabnahme für kritische Infrastruktur vor. [TASKBOARD_PROPOSAL.md](TASKBOARD_PROPOSAL.md) und [IMPLEMENTATION_STATUS.md](../IMPLEMENTATION_STATUS.md) sind historische Planungs-/Evidenzreferenzen, keine aktiven Todo-Listen.
@@ -42,7 +53,7 @@ Keine autonome Bridge-Schleife: Jeder weitere AI-veranlasste Terminaltransfer un
 | Bridge-Identität | Selbstsigniertes Zertifikat; SHA-256 des SPKI öffentlich vergleichen und pinnen | Übernommen, Format präzisiert |
 | Kopplung | Abtippbarer Kurzzeitcode; anschließend individueller langer Schlüssel | Übernommen, Zustände und Limits präzisiert |
 | Isolation | Lokaler Komfortmodus; getrenntes Qube/Gateway für kritische Nutzung | Übernommen |
-| Guards | Nur Erweiterungspunkt, keine Secret-/Risk-Analyse im ersten Prototyp | Nutzerentscheidung |
+| Guards | Optionale lokale sh-guard-Commandanalyse; kein Ersatz menschlicher Freigabe, keine Output-/PII-Analyse | Beauftragter Ausbau vom 18. Oktober 2026; ersetzt den früheren reinen Erweiterungspunkt |
 
 Das Fensterkonzept weicht von der zuletzt bevorzugten eingebetteten V0.6-Variante ab. Grund ist die jetzt ausdrücklich gleich hohe Priorität beider Plattformen bei knappem Budget. Der Benutzer hatte ein separat positioniertes normales Terminal als ursprüngliches Wunschbild genannt; die neue Empfehlung greift dieses wieder auf, mit kontrolliertem PTY-Helfer statt fremdem Terminalzugriff.
 
@@ -58,7 +69,7 @@ Ein eingebettetes Terminal bleibt außerhalb dieses MVP. GTK/VTE beziehungsweise
 
 Diese Etappen strukturieren den MVP, sind aber kein neuer Auftrag zur Wiederimplementierung. P0, P1 und der lokale P2-Transportpfad sind im importierten MVP 0.8 vorhanden. Der vollständige lokale MCP→Review→Bash/PTY→Outputreview→MCP-Round-Trip ist historisch getestet, einschließlich eines realen Tunnel-Clients gegen eine simulierte Kontrollplattform. P0 oder P1 allein gelten weiterhin nicht als verbundenes MVP; ein lokaler P2-Nachweis ersetzt keine echte ChatGPT-/OpenAI- oder Plattformabnahme (§17).
 
-Nicht enthalten: eigener beziehungsweise eingebetteter Vollterminalemulator, harte Prompt-Sperre, exakte Befehls-/Exitcode-Korrelation, automatische Risk- oder Secret-Erkennung/Redaction, autonome Agents, Multi-User-UI, Plugins, automatisch heruntergeladene Updates, große lokale Modelle, Qubes-RPC und zertifizierter Hochsicherheitsbetrieb. Ausschlüsse und lediglich bedingte Alternativen erzeugen keine MVP-Tasks.
+Nicht enthalten: eigener beziehungsweise eingebetteter Vollterminalemulator, harte Prompt-Sperre, exakte Befehls-/Exitcode-Korrelation, automatische Output-/Secret-Erkennung/Redaction, automatische Commandfreigaben, autonome Agents, Multi-User-UI, Plugins, automatisch heruntergeladene Updates, große lokale Modelle, Qubes-RPC und zertifizierter Hochsicherheitsbetrieb. Ausschlüsse und lediglich bedingte Alternativen erzeugen keine MVP-Tasks.
 
 ## 4. Python Datei und Prozessarchitektur
 

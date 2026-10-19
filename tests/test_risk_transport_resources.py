@@ -115,6 +115,11 @@ class HTTPSResponseResourcesTests(unittest.TestCase):
         self.release = fixtures.release_for(self.binary, self.archive)
         self.original_timeout = socket.getdefaulttimeout()
         self.retained = []
+        # These socket fixtures model direct HTTPS. Proxy behavior is tested
+        # separately with a real local CONNECT proxy.
+        proxy = mock.patch("urllib.request.getproxies", return_value={})
+        proxy.start()
+        self.addCleanup(proxy.stop)
 
     def tearDown(self):
         for error in self.retained:

@@ -903,6 +903,8 @@ class ConnectedRoundTripTests(unittest.TestCase):
                 self.core.close_open_return()
         candidates = self.core.output_candidates()
         self.assertEqual({item["submission_id"] for item in candidates}, {first, second})
+        # TRANSFERRED acknowledges the terminal write, not arrival of shell output.
+        self.fixture.wait(lambda: b"MULTI_FLIGHT_TWO\r\n" in self.core.output.data)
         output = self.core.select_current_output()
         with self.assertRaises(a.ProbeError):
             self.core.approve(output.id, submission_id="f" * 32)
@@ -1674,9 +1676,10 @@ class ControllerTakeFlowTests(unittest.TestCase):
 
 
 class RemoteFixture:
-    def __init__(self, directory):
+    def __init__(self, directory, port=None):
+        port_args = [] if port is None else ["--port", str(port)]
         self.process = subprocess.Popen([sys.executable, "-I", str(Path(a.__file__).resolve()), "--bridge",
-                                         "--state-dir", str(directory), "--tls-name", "127.0.0.1", "--pair"],
+                                         "--state-dir", str(directory), "--tls-name", "127.0.0.1", "--pair", *port_args],
                                         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                                         env=a.isolated_service_environment(), close_fds=True)
         try:
@@ -4515,7 +4518,9 @@ class QrexecBridgeFirstTests(unittest.TestCase):
         self.assertEqual(down["phase"], "qrexec_target_unreachable")
         self.assertEqual(plain["phase"], "tls_handshake_failed")
         message = text("qrexec_target_unreachable")
-        self.assertIn("Mögliche", message)  # possible causes, never a definite policy claim
+        self.assertIn("Bridge", message)
+        self.assertIn("Qrexec-Freigabe", message)
+        self.assertIn("welche Ursache vorliegt, ist noch offen", message)
         self.assertNotEqual(message.strip(), "Policy fehlt.")
         self.assertNotIn("Policy", text("tls_handshake_failed"))  # TLS is a separate evidenced phase
 

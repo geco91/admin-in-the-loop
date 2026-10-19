@@ -118,9 +118,10 @@ class InstallationTests(unittest.TestCase):
     def install(self, installation=None):
         return (installation or self.installation).install(self.cancel, lambda _: None, self.transport)
 
-    def test_real_candidates_gate_before_transport_path_or_execution(self):
-        for release in a.RISK_RELEASES.values():
-            self.assertFalse(release.approved)
+    def test_unadmitted_releases_gate_before_transport_path_or_execution(self):
+        for admitted in a.RISK_RELEASES.values():
+            self.assertTrue(admitted.approved)
+            release = replace(admitted, approved=False)
             install = a.CommandRiskInstallation(self.base, release)
             with mock.patch.object(a.subprocess, "Popen") as spawn:
                 for fn in (lambda: install.check(self.cancel), lambda: self.install(install), install.remove):
@@ -137,7 +138,7 @@ class InstallationTests(unittest.TestCase):
                                         ("darwin", "arm64", "aarch64-apple-darwin")):
             with mock.patch.object(a.sys, "platform", system), mock.patch.object(a.platform, "machine", return_value=machine):
                 self.assertEqual(a.command_risk_release().target, target)
-                self.assertFalse(a.command_risk_release().approved)
+                self.assertTrue(a.command_risk_release().approved)
         with mock.patch.object(a.platform, "machine", return_value="unsupported"):
             with self.assertRaisesRegex(a.ProbeError, "risk_platform"):
                 a.command_risk_release()
@@ -398,24 +399,25 @@ class RiskGUITests(unittest.TestCase):
             time.sleep(0.01)
         self.fail("gui_fixture_deadline")
 
-    def test_default_candidate_unavailable_no_dialog_no_autonomous_transfer(self):
+    def test_unadmitted_release_unavailable_no_dialog_no_autonomous_transfer(self):
         self.core.review_command("printf x")
         self.ui.render()
         self.assertFalse(self.ui.risk_enabled.get())
-        with mock.patch.object(self.ui.messagebox, "askyesno") as confirm, \
+        with mock.patch.object(a, "command_risk_release", return_value=replace(a.command_risk_release(), approved=False)), \
+                mock.patch.object(self.ui.messagebox, "askyesno") as confirm, \
                 mock.patch.object(a.subprocess, "Popen") as spawn:
             self.ui.risk_checkbox.invoke()
             self.root.update()
-            self.assertIn("freigabe fehlt", self.ui.risk_status.get())
+            self.assertIn("nicht für die Installation zugelassen", self.ui.risk_hint.get())
             confirm.assert_not_called()
             spawn.assert_not_called()
         self.assertTrue(self.ui.approve_button.instate(["!disabled"]))
         self.core.channel.send.assert_not_called()
-        self.ui.risk_details_button.invoke()
+        self.ui.command_risk_details()
         self.root.update()
         self.assertIn("GPL-3.0-only", self.ui.risk_details_box.text.get("1.0", "end"))
         self.ui.risk_checkbox.invoke()
-        self.assertEqual(self.ui.risk_status.get(), "")
+        self.assertEqual(self.ui.risk_status.get(), "Analyse ausgeschaltet")
         self.assertFalse(self.errors)
 
     def test_fixture_install_confirmation_projection_details_stale_and_unknown(self):
@@ -428,13 +430,16 @@ class RiskGUITests(unittest.TestCase):
         original = a.CommandRiskSetup
         with mock.patch.object(a, "command_risk_release", return_value=release), \
                 mock.patch.object(a, "CommandRiskSetup", side_effect=lambda installation, install=False:
-                                  original(installation, install, lambda *_: raw)), \
-                mock.patch.object(self.ui.messagebox, "askyesno", return_value=True) as confirm:
+                                  original(installation, install, lambda *_: raw)):
             self.ui.risk_checkbox.invoke()
-            self.until(lambda: self.ui.risk_status.get().startswith("Risk 100/100"))
-        self.assertIn("0.1.10", confirm.call_args.args[1])
-        self.assertIn(str(self.base), confirm.call_args.args[1])
-        self.assertIn("Analyse-Binary", confirm.call_args.args[1])
+            self.until(lambda: self.core.risk_setup_state == "INSTALL_CONFIRM")
+            self.assertEqual(self.ui.risk_views.select(), str(self.ui.risk_settings_page))
+            self.assertEqual(self.ui.review_notebook.select(), str(self.ui.risk_summary_tab))
+            self.assertEqual(self.core.review_state, "REVIEW")
+            self.ui.risk_install_button.invoke()
+            self.until(lambda: self.ui.risk_status.get().startswith("Kritisch · 100/100"))
+        self.assertEqual(self.core.risk_installation.release.version, "0.1.10")
+        self.assertTrue(self.core.risk_installation.destination.is_relative_to(self.base))
         display = self.ui.editor.text.get("1.0", "end-1c")
         self.assertEqual(display, "".join(value for value, _ in a.review_fragments(review.text)))
         ranges = self.ui.editor.text.tag_ranges("risk-sub-0")
@@ -442,7 +447,7 @@ class RiskGUITests(unittest.TestCase):
         marked = self.ui.editor.text.get(*ranges)
         self.assertEqual(marked, "".join(value for value, _ in a.review_fragments(source.rstrip("\n"))))
         self.assertEqual(self.core.review.payload, source.encode())
-        self.ui.risk_details_button.invoke()
+        self.ui.command_risk_details()
         self.root.update()
         details = self.ui.risk_details_box.text.get("1.0", "end")
         for label in ("parse_confidence", "risk_factors", "executable", "intent", "targets", "flags",
@@ -452,12 +457,13 @@ class RiskGUITests(unittest.TestCase):
         self.core.edit_review(review.id, "echo $(id)", True)
         self.ui.render()
         self.assertFalse(self.ui.editor.text.tag_ranges("risk-sub-0"))
-        self.until(lambda: self.ui.risk_status.get().startswith("Zuordnung unbekannt"))
+        self.until(lambda: "Einzelmarkierungen nicht verfügbar" in self.ui.risk_hint.get())
+        self.assertTrue(self.ui.risk_status.get().startswith("Kritisch · 100/100"))
         self.assertFalse(self.ui.editor.text.tag_ranges("risk-sub-0"))
         self.assertNotIn(review.id, self.ui.risk_details_box.text.get("1.0", "end"))
         self.core._output_review("separate output")
         self.ui.render()
-        self.assertTrue(self.ui.risk_checkbox.instate(["disabled"]))
+        self.assertTrue(self.ui.risk_checkbox.instate(["!disabled"]))
         self.assertFalse(self.ui.editor.text.tag_ranges("risk-sub-0"))
         self.assertFalse(self.errors)
 

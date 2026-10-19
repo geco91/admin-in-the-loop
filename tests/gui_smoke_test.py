@@ -25,7 +25,7 @@ from test_local_setup import fake_brew
 
 
 class GUISmokeTests(unittest.TestCase):
-    def test_native_tk_xterm_review_and_connection_dialog(self):
+    def test_native_tk_terminal_review_and_connection_dialog(self):
         with tempfile.TemporaryDirectory(prefix="aitl-gui-") as directory:
             preferences = Path(directory, "config")
             core = a.AppCore(a.PreferenceStore(preferences), a.ConnectionStore(preferences))
@@ -210,8 +210,9 @@ class ConnectionDialogTests(unittest.TestCase):
         left, center, right = self.ui.panels
         self.assertEqual(left.cget("highlightbackground"), right.cget("highlightbackground"))
         self.assertNotEqual(left.cget("highlightbackground"), center.cget("highlightbackground"))
-        self.assertTrue(any(getattr(widget, "cget", lambda _: "")("text") == "Review"
-                            for widget in self.descendants(center) if widget.winfo_class() == "TLabel"))
+        self.assertTrue(self.ui.review_picker.winfo_ismapped())
+        self.assertIn("Befehlsprüfung", self.ui.review_selection.get())
+        self.assertFalse(self.ui.review_options.winfo_viewable())
         self.assertEqual(self.ui.editor.text.cget("state"), "disabled")
         self.assertEqual(self.callbacks, [])
 
@@ -302,6 +303,9 @@ class ConnectionDialogTests(unittest.TestCase):
         dialog.wizard_goto(1)
         self.root.update()
         self.assertTrue(dialog.chat_section.winfo_ismapped())
+        self.assertFalse(dialog.controls.winfo_ismapped())
+        dialog.details_button.invoke()
+        self.root.update()
         self.assertTrue(dialog.controls.winfo_ismapped())
         dialog.buttons["offline"].focus_force()
         self.root.update()
@@ -412,7 +416,8 @@ class ConnectionDialogTests(unittest.TestCase):
         self.assertNotEqual(self.core.chat_binding["code"], old_code)
         self.assertEqual(self.ui.chat_code.get(), self.core.chat_binding["code"][:4] + "-" +
                          self.core.chat_binding["code"][4:])
-        self.assertEqual(sum(isinstance(widget, tk.Toplevel) for widget in self.root.winfo_children()), 1)
+        self.assertEqual(sum(isinstance(widget, tk.Toplevel) and widget.winfo_viewable()
+                             for widget in self.root.winfo_children()), 1)
         self.core.disconnect_bridge()
         self.ui.render()
         self.assertEqual(dialog.binding.get(), "")
@@ -749,9 +754,10 @@ for variant, background in (("light", "#ffffff"), ("dark", "#101010")):
                     assert widget.winfo_width() >= panel.winfo_width() - 30
         for label, _ in ui.status_labels:
             assert str(label.cget("justify")) == "center"
-        review_title = next(w for w in descendants(ui.panels[1])
-                            if isinstance(w, ttk.Label) and w.cget("text") == "Review")
-        assert review_title.pack_info()["anchor"] == "w"
+        assert ui.review_picker.winfo_ismapped()
+        assert ui.review_picker.grid_info()["sticky"] == "ew"
+        assert ui.review_selection.get().startswith("Befehlsprüfung")
+        assert not ui.review_options.winfo_viewable()
         assert ui.editor.text.cget("state") == "disabled"
     assert core.bridge_process is None and core.tunnel is None
     results.append({"variant": variant, "dimensions": [80, 64], "sections": ["terminal", "ai"], "mapped": True})
@@ -934,6 +940,78 @@ class WorkPackageReviewUITests(unittest.TestCase):
         self.assertEqual(self.core.review, review)
         self.assertEqual(self.core.review_state, "REVIEW")
         window.destroy()
+
+    def test_mouse_context_copy_paste_for_entries_text_and_readonly_fields(self):
+        window = tk.Toplevel(self.root)
+        try:
+            widgets = (tk.Entry(window), ttk.Entry(window, show="*"), ttk.Combobox(window),
+                       tk.Spinbox(window), ttk.Spinbox(window), tk.Text(window, height=2))
+            for widget in widgets:
+                widget.pack()
+            self.root.update()
+            menu = self.ui.clipboard_menu.menu
+            for widget in widgets:
+                with self.subTest(widget=widget.winfo_class()):
+                    self.root.clipboard_clear()
+                    self.root.clipboard_append("MOUSE-é")
+                    widget.event_generate("<Button-3>", x=5, y=5, rootx=100, rooty=100)
+                    self.root.update()
+                    self.assertIs(self.ui.clipboard_menu.target, widget)
+                    self.assertEqual(str(menu.entrycget("Einfügen", "state")), "normal")
+                    menu.invoke("Einfügen")
+                    menu.unpost()
+                    if isinstance(widget, tk.Text):
+                        self.assertEqual(widget.get("1.0", "end-1c"), "MOUSE-é")
+                        widget.tag_add("sel", "1.0", "end-1c")
+                    else:
+                        self.assertIn("MOUSE-é", widget.get())
+                        widget.selection_range(0, "end")
+                    widget.event_generate("<Button-3>", x=5, y=5, rootx=100, rooty=100)
+                    self.root.update()
+                    menu.invoke("Kopieren")
+                    menu.unpost()
+                    copied = widget.get("1.0", "end-1c") if isinstance(widget, tk.Text) else widget.get()
+                    self.assertEqual(self.root.clipboard_get(), copied)
+            entry = widgets[1]
+            entry.configure(state="readonly")
+            entry.selection_range(0, "end")
+            entry.event_generate("<Button-3>", x=5, y=5, rootx=100, rooty=100)
+            self.root.update()
+            self.assertEqual(str(menu.entrycget("Einfügen", "state")), "disabled")
+            self.assertEqual(str(menu.entrycget("Kopieren", "state")), "normal")
+            menu.unpost()
+            self.assertIsNone(self.core.review)
+        finally:
+            window.destroy()
+
+    def test_code_context_paste_edits_source_selection_only_after_apply(self):
+        review = self.core.review_command("echo é😀 old", False)
+        self.ui.render()
+        box = self.ui.editor
+        box.show_review(review.text, ((0, len(review.text), 50),))
+        first, last = review.text.index("old"), len(review.text)
+        box.text.tag_add("sel", box.copy_positions[first], box.copy_positions[last])
+        self.root.clipboard_clear()
+        self.root.clipboard_append("new")
+        with mock.patch.object(self.core, "approve") as approve:
+            box.text.event_generate("<Button-3>", x=5, y=5, rootx=100, rooty=100)
+            self.root.update()
+            self.ui.context.invoke("Einfügen")
+            self.ui.context.unpost()
+            self.root.update()
+            self.assertEqual(self.ui.edit_box.text.get("1.0", "end-1c"), "echo é😀 new")
+            self.assertEqual(self.core.review, review)
+            self.ui.edit_apply_button.invoke()
+            self.root.update()
+            self.assertEqual(self.core.review.text, "echo é😀 new")
+            self.assertGreater(self.core.review.revision, review.revision)
+            self.assertEqual(self.core.review_state, "REVIEW")
+            approve.assert_not_called()
+        self.core.review_state = "ACKNOWLEDGED_LOCAL"
+        box.text.event_generate("<Button-3>", x=5, y=5, rootx=100, rooty=100)
+        self.root.update()
+        self.assertEqual(str(self.ui.context.entrycget("Einfügen", "state")), "disabled")
+        self.ui.context.unpost()
 
     def test_keyboard_and_context_copy_keep_review_colors_font_and_risk_tags(self):
         review = self.core.review_command("echo é😀", False)
@@ -1161,6 +1239,72 @@ class StageConflictDialogTests(unittest.TestCase):
         self.until(lambda: self.core.review_state == "TRANSFERRED")
         self.assertTrue(Path(self.tmp.name, "gui-b-marker").exists())
         self.assertEqual(self.core.open_return["return_state"], "offen_sammelnd")  # B's own return now
+
+    def test_recheck_running_command_output_before_and_after_first_return_without_reexecution(self):
+        gate = Path(self.tmp.name, "continue-output")
+        counter = Path(self.tmp.name, "execution-count")
+        # Octal markers prevent the shell's echoed command from satisfying output checks.
+        command = ("printf 'run\\n' >> execution-count; printf '\\101\\114\\120\\110\\101\\n'; "
+                   "while [ ! -e continue-output ]; do sleep 0.02; done; "
+                   "printf '\\102\\105\\124\\101\\n'")
+        try:
+            self.submit(command, "RECHECK_OUTPUT_0001")
+            self.take()
+            submission = self.core.review.proposal_id
+            self.transfer()
+            self.until(lambda: b"ALPHA\r\n" in self.core.output.data)
+            with mock.patch.object(self.core.channel, "send", wraps=self.core.channel.send) as terminal_send:
+                self.ui.from_terminal_button.invoke()
+                first = self.core.review
+                self.assertEqual(first.direction, "TO_OUTPUT_SINK")
+                self.assertIn("ALPHA\n", first.text)
+                self.assertNotIn("BETA\n", first.text)
+                draft = self.core.edit_review(first.id, "unshared draft", False)
+                self.ui.render()
+                # Every click reloads a fresh capture, even while already reviewing output.
+                self.ui.from_terminal_button.invoke()
+                self.assertNotEqual(self.core.review.id, draft.id)
+                self.assertIn("ALPHA\n", self.core.review.text)
+                self.assertNotIn("unshared draft", self.core.review.text)
+                self.core.edit_review(self.core.review.id, "checked ALPHA\n", False)
+                self.ui.render()
+                self.ui.approve_button.invoke()
+                with self.assertRaisesRegex(a.ProbeError, "return_not_ready"):
+                    self.core.take_return_review()
+                with self.assertRaisesRegex(a.ProbeError, "transfer_in_progress"):
+                    self.core.select_current_output()
+                self.until(lambda: self.core.review_state == "ACKNOWLEDGED")
+                first_id = self.core.review.id
+                self.assertIsNone(self.core.open_return)
+                self.assertFalse(gate.exists())  # The command is still waiting for its late output.
+                first_return = mcp(self.core.bridge_process, "get_approved_output", {"submission_id": submission})
+                self.assertEqual(first_return["outputs"][0]["text"], "checked ALPHA\n")
+                self.assertEqual(first_return["outputs"][0]["submission_id"], submission)
+                gate.touch()
+                self.until(lambda: b"BETA\r\n" in self.core.output.data)
+                self.ui.from_terminal_button.invoke()
+                second = self.core.review
+                self.assertNotEqual(second.id, first_id)
+                self.assertEqual(second.direction, "TO_OUTPUT_SINK")
+                self.assertIn("ALPHA\n", second.text)
+                self.assertIn("BETA\n", second.text)
+                self.assertEqual(self.ui.binding_submission[self.ui.binding_value.get()], submission)
+                args = {"submission_id": submission, "cursor": first_return["cursor"]}
+                self.assertEqual(mcp(self.core.bridge_process, "get_approved_output", args)["outputs"], [])
+                second = self.core.edit_review(second.id, "checked ALPHA\nchecked BETA\n", False)
+                self.ui.render()
+                self.ui.approve_button.invoke()
+                self.until(lambda: self.core.review_state == "ACKNOWLEDGED")
+                late_return = mcp(self.core.bridge_process, "get_approved_output", args)["outputs"]
+                self.assertEqual(len(late_return), 1)
+                self.assertEqual(late_return[0]["submission_id"], submission)
+                self.assertEqual(late_return[0]["text"].encode(), second.payload)
+                self.assertNotEqual(late_return[0]["output_id"], first_return["outputs"][0]["output_id"])
+                self.assertFalse(self.core.inbox)
+                terminal_send.assert_not_called()  # Reviewing/editing/returning never sends terminal input.
+            self.assertEqual(counter.read_text(), "run\n")
+        finally:
+            gate.touch()  # Always let the existing fixture finish its command and clean up.
 
     def test_bidirectional_dialogs_park_and_resume_via_ui(self):
         self.submit("printf 'GUI_STAGE_A\\n'", "GUI_BIDI_A_00001")
@@ -1409,7 +1553,7 @@ class QrexecDialogTests(unittest.TestCase):
         dialog.location.set("QREXEC")
         self.root.update()
         self.assertTrue(dialog.q1.winfo_ismapped())
-        self.assertNotIn("qrexec_copy_command", dialog.buttons)  # J82: kein Kopierbutton
+        self.assertIn("qrexec_copy_command", dialog.buttons)  # One-click copy in the simplified setup.
         self.assertNotIn("qrexec_pin", dialog.fields)  # #90: keine Hex-Pflichteingabe
         # Feldbezogene Validierung am Schritt 1, inkl. IP/localhost-Ausschluss.
         for bad in ("bad name", "127.0.0.1", "localhost"):

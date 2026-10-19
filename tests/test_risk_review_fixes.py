@@ -26,6 +26,9 @@ import test_risk_install_ui as fixtures
 
 class TransportBoundaryTests(unittest.TestCase):
     def setUp(self):
+        proxy = mock.patch("urllib.request.getproxies", return_value={})
+        proxy.start()
+        self.addCleanup(proxy.stop)
         self.binary = fixtures.fake_binary()
         self.archive = fixtures.archive_for(self.binary)
         self.release = fixtures.release_for(self.binary, self.archive)

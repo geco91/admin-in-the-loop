@@ -1,1 +1,5 @@
 .opencode-vm/
+__pycache__/
+*.py[cod]
+admin_in_the_loop.py.bak
+.aitl-update-*
