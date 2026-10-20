@@ -282,6 +282,7 @@ class ActivationTests(unittest.TestCase):
         InstallationTests.setUp(self)
         self.core = a.AppCore(preference_store=a.PreferenceStore(self.base))
         self.core.session, self.core.connection = "TEST_SESSION", "CONNECTED"
+        self.core.set_command_target("TERMINAL")
         self.core.channel = mock.Mock()
         self.core.channel.receive.return_value = []
         self.addCleanup(self.core.close)
@@ -373,6 +374,7 @@ class RiskGUITests(unittest.TestCase):
         self.base = Path(self.temp.name).resolve() / "config"
         self.core = a.AppCore(preference_store=a.PreferenceStore(self.base))
         self.core.session, self.core.connection = "GUI_TEST_SESSION", "CONNECTED"
+        self.core.set_command_target("TERMINAL")
         self.core.channel = mock.Mock()
         self.core.channel.receive.return_value = []
         self.root = tk.Tk()

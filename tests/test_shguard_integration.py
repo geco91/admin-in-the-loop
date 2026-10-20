@@ -283,6 +283,7 @@ class NativeIntegrationTests(unittest.TestCase):
             errors = []
             root.report_callback_exception = lambda *_: errors.append("tk_callback")
             core.session, core.connection = "NATIVE_GUI", "CONNECTED"
+            core.set_command_target("TERMINAL")
             core.channel = mock.Mock()
             core.channel.receive.return_value = []
             ui = a.ReviewUI(root, core)
@@ -343,6 +344,7 @@ class NativeIntegrationTests(unittest.TestCase):
             original = a.CommandRiskSetup
             try:
                 core.session, core.connection = "NATIVE_TEST", "CONNECTED"
+                core.set_command_target("TERMINAL")
                 core.channel = mock.Mock()
                 core.channel.receive.return_value = []
                 sentinel = Path(directory) / "never-execute"

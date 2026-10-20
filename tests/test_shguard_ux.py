@@ -25,6 +25,7 @@ class CommandRiskUXTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.core = a.AppCore(a.PreferenceStore(Path(self.temp.name) / "config"))
         self.core.session, self.core.connection = "UX_TEST", "CONNECTED"
+        self.core.set_command_target("TERMINAL")
         self.core.channel = mock.Mock()
         self.core.channel.receive.return_value = []
         self.root = tk.Tk()

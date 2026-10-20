@@ -75,11 +75,59 @@ def mcp(process, name, args=None, modern=False):
     return data
 
 
+class ClipboardRoutingTests(unittest.TestCase):
+    def test_defaults_follow_terminal_lifecycle_without_retargeting_active_copy(self):
+        core = a.AppCore()
+        self.addCleanup(core.close)
+        self.assertEqual((core.output_mode, core.command_target), ("CLIPBOARD", "CLIPBOARD"))
+        core.add_proposal("printf 'COPY_WITHOUT_TERMINAL'")
+        review = core.review_pending_proposal()
+        self.assertEqual(review.command_target, "CLIPBOARD")
+        self.assertIsNone(review.session)
+        core.connection = "STARTING_SHELL"
+        core._event({"type": "ready", "session": "12345678-1234-1234-1234-123456789012"})
+        self.assertEqual((core.output_mode, core.command_target), ("SINCE_LAST", "TERMINAL"))
+        self.assertEqual(core.review, review)  # Opening a shell never grants a new destination.
+        copied = []
+        core.copy_command(review.id, copied.append)
+        self.assertEqual(copied, [review.text])
+        core._disconnect()
+        self.assertEqual((core.output_mode, core.command_target), ("CLIPBOARD", "CLIPBOARD"))
+
+    def test_explicit_switch_rebuilds_review_and_old_terminal_approval_is_stale(self):
+        core = a.AppCore()
+        self.addCleanup(core.close)
+        core.connection = "STARTING_SHELL"
+        core._event({"type": "ready", "session": "12345678-1234-1234-1234-123456789012"})
+        terminal = core.review_command("printf 'ROUTING'")
+        core.set_output_mode("CLIPBOARD")
+        copy = core.review
+        self.assertNotEqual(terminal.id, copy.id)
+        self.assertEqual((core.output_mode, core.command_target, copy.command_target),
+                         ("CLIPBOARD", "CLIPBOARD", "CLIPBOARD"))
+        self.assertFalse(copy.final_return)
+        with self.assertRaisesRegex(a.ProbeError, "stale_review"):
+            core.approve(terminal.id)
+        with self.assertRaisesRegex(a.ProbeError, "clipboard_target_requires_copy"):
+            core.approve(copy.id)
+        core.set_output_mode("LAST_50")
+        self.assertEqual(core.review.command_target, "TERMINAL")
+        self.assertTrue(core.review.final_return)
+        self.assertEqual(core.command_target, "TERMINAL")
+        with self.assertRaisesRegex(a.ProbeError, "stale_review"):
+            core.copy_command(copy.id, lambda _: self.fail("stale clipboard write"))
+        core.review_state = "CHECKING"
+        with self.assertRaisesRegex(a.ProbeError, "transfer_in_progress"):
+            core.set_output_mode("CLIPBOARD")
+        self.assertEqual(core.output_mode, "LAST_50")
+
+
 class ReviewByteDetailTests(unittest.TestCase):
     def test_normalization_counts_and_final_bytes_follow_existing_rules(self):
         core = a.AppCore()
         self.addCleanup(core.close)
         core.session, core.connection = "synthetic", "CONNECTED"
+        core.set_command_target("TERMINAL")
         for text, counts in [("a\r\nb\r\r\n", (2, 1, 2)), ("a\n\n", (0, 0, 2)),
                              ("a\nb", (0, 0, 0)), ("é😀", (0, 0, 0))]:
             for final_return in (False, True):
@@ -1744,14 +1792,19 @@ class ControllerTakeFlowTests(unittest.TestCase):
         if self.core.review_state == "OVERRIDE_REQUIRED":
             self.core.approve(self.core.review.id, override=True)
         self.fixture.wait(lambda: self.core.review_state == "TRANSFERRED"
-                          and b"OBSERVE_BIND" in self.core.output.data)
+                          and b"OBSERVE_BIND\r\n" in self.core.output.data)
         output = self.core.select_current_output()
         with self.assertRaisesRegex(a.ProbeError, "unknown_output_binding"):
             self.core.note_output_binding(output.id, "e" * 32)
         self.core.note_output_binding(output.id, first)
-        self.fixture.wait(lambda: mcp(self.process, "get_submission_status",
-                                      {"submission_id": first})["output_reviewed_at"] is not None,
-                          timeout=6)
+        next_status_check = [0.0]
+        def reviewed_observed():
+            if time.monotonic() < next_status_check[0]:
+                return False
+            next_status_check[0] = time.monotonic() + 0.2
+            return mcp(self.process, "get_submission_status",
+                       {"submission_id": first})["output_reviewed_at"] is not None
+        self.fixture.wait(reviewed_observed, timeout=6)
         self.core.approve(output.id, submission_id=first, explicit_binding=True)
         self.fixture.wait(lambda: self.core.review_state == "ACKNOWLEDGED", timeout=6)
         status = mcp(self.process, "get_submission_status", {"submission_id": first})
@@ -3912,7 +3965,7 @@ class BindingDisplayRegressionTests(unittest.TestCase):
                            {"submission_id": self.second, "text_view": "second"}]
         value = [""]
         self.snapshot = SimpleNamespace(bridge=SimpleNamespace(state="CONNECTED"), review_state="REVIEW",
-                                        review=SimpleNamespace(id="review-id", direction="TO_OUTPUT_SINK"))
+                                        review=SimpleNamespace(id="review-id", direction="TO_OUTPUT_SINK", output_source="TERMINAL"))
         self.ui = SimpleNamespace(core=SimpleNamespace(output_candidates=lambda: self.candidates,
             last_proposal_id=self.second, snapshot=lambda: self.snapshot, approve=mock.Mock()),
             binding_row=mock.Mock(), binding_picker=mock.Mock(),
@@ -3959,7 +4012,7 @@ class BindingDisplayRegressionTests(unittest.TestCase):
         self.assertEqual(self.ui.binding_value.get(), label)
         self.ui.binding_row.grid_remove.assert_not_called()
         # A different review gets a fresh mapping/default, never the consumed selection.
-        self.snapshot.review = SimpleNamespace(id="next-review", direction="TO_OUTPUT_SINK")
+        self.snapshot.review = SimpleNamespace(id="next-review", direction="TO_OUTPUT_SINK", output_source="TERMINAL")
         self.snapshot.review_state = "REVIEW"
         self.snapshot.bridge.state = "CONNECTED"
         self.candidates.append({"submission_id": self.second, "text_view": "second"})
@@ -4023,6 +4076,7 @@ class RiskSentPreservationTests(unittest.TestCase):
         self.core = a.AppCore()
         self.core.session = "RISK_SENT_SESSION"
         self.core.connection = "CONNECTED"
+        self.core.set_command_target("TERMINAL")
         self.core.channel = mock.Mock()
         self.core.channel.receive.return_value = []
         self.addCleanup(self.core.close)

@@ -16,7 +16,7 @@ weitergegeben. Das Terminal bleibt unabhängig manuell bedienbar.
 
 ## Aktuelle persönliche Testversion
 
-**Aktuelle persönliche Testversion: v0.9.21 mit Zwischenablage als Quelle und Ziel ohne Terminalpflicht.**
+**Aktuelle persönliche Testversion: v0.9.22 mit automatischem Zwischenablage-Fallback und gemeinsamer Moduswahl.**
 Links im Terminalbereich wird die Rückgabeprüfung eingestellt, rechts im AI-Bereich
 die Befehlsprüfung. Die Mitte bleibt für Code/Ausgabe und die passenden Prüfreiter
 mit Ampel und Befundzahl frei. [Echte Beispielansichten](doc/REVIEW_LAYOUT.md).
@@ -24,40 +24,48 @@ Der Stand bündelt außerdem sh-guard, überarbeitete Verbindungseinrichtung,
 erneutes Prüfen desselben Command-Outputs und Maus-Kontextmenüs. Änderungen
 stehen im [Changelog](CHANGELOG.md).
 
-Links unter **Ausgabebereich → Zwischenablage** wählen und **Prüfen →** anklicken.
-Erst dann wird der aktuelle Text aus der lokalen Zwischenablage in die Mitte
-übernommen. Dort prüfen, bei Bedarf bearbeiten und ausdrücklich an die AI
-freigeben. Standardmäßig ist diese Ausgabe unabhängig vom letzten Command;
-eine offene Terminalrückgabe bleibt offen. Eine bereits aktive Prüfung zuerst
-abschließen oder verwerfen. Dafür muss kein Terminal geöffnet sein; es wird
-kein Command ausgeführt.
+Ohne geöffnetes Terminal startet die App im **Zwischenablage-Modus**: AI-Vorschläge
+lassen sich bereits übernehmen, prüfen, bearbeiten und ausdrücklich in die
+Zwischenablage kopieren. Kein Hinweis fordert dafür zum Öffnen des Terminals auf.
+Sobald das Terminal verbunden ist, werden **Terminal** und **Letzter Command**
+als Standard für neue Vorgänge gewählt. Bei Terminaltrennung gilt wieder
+Zwischenablage. Eine laufende Kopierprüfung wird beim Öffnen der Shell nicht
+automatisch zur Terminalfreigabe.
 
-Auch die Gegenrichtung ist möglich: Rechts **Ziel für AI-Vorschläge →
-Zwischenablage** wählen, dann den AI-Vorschlag übernehmen, prüfen und bei Bedarf
-bearbeiten. **In Zwischenablage kopieren** übernimmt nur den geprüften Text.
-Die App führt ihn nicht aus und hängt kein automatisches finales Return an.
-Die Zielauswahl ist während einer aktiven Prüfung gesperrt.
+**Ausgabebereich → Zwischenablage** und das Ziel für AI-Vorschläge sind gekoppelt.
+Diese Auswahl gilt deshalb auch bei geöffnetem Terminal: AI-Vorschläge werden
+nur mit **In Zwischenablage kopieren** übernommen und nicht ins Terminal gesendet.
+Ein Wechsel bei offenem Command erzeugt einen neuen Review; alte Freigaben gelten
+nicht mehr. Während Übernahme oder Zustellung ist die Moduswahl gesperrt.
+Zeilenbereiche bzw. **Letzter Command** schalten zurück zum Terminalmodus.
+
+Links liest **Prüfen →** den aktuellen Zwischenablagetext zur Rückgabe an die AI.
+Erst nach Prüfung und ausdrücklicher Freigabe wird er geteilt. Die Rückgabe ist
+standardmäßig unabhängig vom letzten Command; dessen offene Rückgabe bleibt
+erhalten. Kopieren an die Zwischenablage hängt kein automatisches finales Return
+an. Ohne zuvor aus der App freigegebenen Command zeigt **Letzter Command** einen
+Hinweis; für manuelle Terminalausgaben einen Zeilenbereich wählen.
 
 Nur Text bis 64 KiB innerhalb des bestehenden Nachrichtenlimits; unsichtbare
 Steuerzeichen einschließlich Tabs werden wie bei Terminalrückgaben abgewiesen.
 Unter Qubes muss der Text vorher in die lokale Zwischenablage des App-Qubes
 übertragen werden. Bilder und Dateien werden nicht übernommen.
 
-Für den behobenen Tunnel-Start-Timeout auch die Bridge auf v0.9.21 bringen und
-mit demselben State-Verzeichnis neu starten. Gespeicherte Kopplung und Credentials
-bleiben erhalten. [Details und Prüfnachweis](doc/RELEASE_V0.9.21.md).
+Für die Modusänderung genügt das Controller-Update. Die enthaltene
+Tunnelkorrektur benötigt eine Bridge ab v0.9.20; ältere Bridges mit demselben
+State-Verzeichnis neu starten. Gespeicherte Kopplung und Credentials bleiben erhalten. [Details und Prüfnachweis](doc/RELEASE_V0.9.22.md).
 
 ## Herunterladen und ausprobieren
 
-[Python-Datei v0.9.21 herunterladen](https://raw.githubusercontent.com/geco91/admin-in-the-loop/refs/tags/v0.9.21/admin_in_the_loop.py) ·
-[Gesamtes Repository als ZIP](https://github.com/geco91/admin-in-the-loop/archive/refs/tags/v0.9.21.zip)
+[Python-Datei v0.9.22 herunterladen](https://raw.githubusercontent.com/geco91/admin-in-the-loop/refs/tags/v0.9.22/admin_in_the_loop.py) ·
+[Gesamtes Repository als ZIP](https://github.com/geco91/admin-in-the-loop/archive/refs/tags/v0.9.22.zip)
 
 Die einzelne Python-Datei genügt für die Anwendung; Tests und Dokumentation
 liegen zusätzlich im ZIP. In einem eigenen, leeren Verzeichnis herunterladen:
 
 ```bash
 curl --fail --location --proto '=https' --tlsv1.2 \
-  https://raw.githubusercontent.com/geco91/admin-in-the-loop/refs/tags/v0.9.21/admin_in_the_loop.py \
+  https://raw.githubusercontent.com/geco91/admin-in-the-loop/refs/tags/v0.9.22/admin_in_the_loop.py \
   --output admin_in_the_loop.py
 python3 admin_in_the_loop.py
 ```

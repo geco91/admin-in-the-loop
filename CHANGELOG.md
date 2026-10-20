@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.9.22 — Gemeinsamer Zwischenablage-/Terminalmodus
+
+- Ohne Terminal sind Rückgabequelle und AI-Ziel standardmäßig Zwischenablage;
+  Vorschläge lassen sich ohne Terminal übernehmen und prüfen. Nach „Terminal
+  bereit“ sind Terminal und „Letzter Command“ der Standard für neue Vorgänge.
+  Bei Terminaltrennung wird wieder Zwischenablage gewählt.
+- Die Auswahl „Ausgabebereich → Zwischenablage“ schaltet jetzt auch das AI-Ziel
+  um. Zuvor blieb dieses unabhängig auf Terminal stehen. Im Zwischenablage-Modus
+  werden Vorschläge ausschließlich kopiert; der Terminalfreigabeweg ist gesperrt.
+- Manuelles Umschalten eines offenen Commands erzeugt einen neuen Review mit
+  neuer Revision und passender Return-Behandlung. Submission-Zuordnung und
+  Ablaufzeit bleiben erhalten, alte Freigaben werden ungültig. Ein automatischer
+  Standardwechsel beim Shellstart ändert kein bereits festgehaltenes Kopierziel.
+- Modusänderungen während Übernahme oder Zustellung sind gesperrt. Ohne erste
+  Command-Freigabe erklärt „Letzter Command“ die Situation; manuelle Ausgaben
+  können weiterhin über Zeilenbereiche geprüft werden.
+
+Prüfnachweis und Grenzen: [v0.9.22](doc/RELEASE_V0.9.22.md).
+
 ## 0.9.21 — Zwischenablage als Ziel für AI-Vorschläge
 
 - Rechts ist „Ziel für AI-Vorschläge“ mit Terminal oder Zwischenablage wählbar,

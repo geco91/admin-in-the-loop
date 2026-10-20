@@ -42,8 +42,8 @@ class GUISmokeTests(unittest.TestCase):
                 self.assertLessEqual(abs(ui.from_terminal_button.winfo_rooty() - ui.from_ai_button.winfo_rooty()), 1)
                 self.assertLessEqual(abs(ui.from_ai_button.winfo_rooty() - ui.approve_button.winfo_rooty()), 1)
                 self.assertEqual(ui.preference.get(), "SMALL")
-                self.assertEqual(core.output_mode, "LAST_20")
-                self.assertEqual(ui.output_mode.get(), "Letzte 20")
+                self.assertEqual(core.output_mode, "CLIPBOARD")
+                self.assertEqual(ui.output_mode.get(), "Zwischenablage")
                 self.assertTrue(ui.terminal_button.winfo_ismapped())
                 ui.output_mode.set("Letzte 50")
                 ui.change_output_mode()
@@ -164,11 +164,10 @@ class ConnectionDialogTests(unittest.TestCase):
         self.core.start_local(self.tmp.name)
         self.core.connect_local_bridge()
         self.until(lambda: self.core.bridge_state == "CONNECTED")
-        self.ui.command_target.set("Zwischenablage")
-        self.ui.command_target_picker.event_generate("<<ComboboxSelected>>")
-        self.root.update()
+        self.assertEqual(self.ui.command_target.get(), "Zwischenablage")
+        self.assertEqual(self.ui.output_mode.get(), "Zwischenablage")
         self.assertEqual(self.core.command_target, "CLIPBOARD")
-        self.assertEqual(self.core.output_mode, "LAST_20")  # Source and target are independent.
+        self.assertEqual(self.core.output_mode, "CLIPBOARD")  # Source and target use the same mode.
         self.root.clipboard_clear()
         self.root.clipboard_append("KEEP UNTIL APPROVAL")
         proposal = mcp(self.core.bridge_process, "submit_proposal", {
@@ -188,7 +187,7 @@ class ConnectionDialogTests(unittest.TestCase):
             self.assertEqual(self.ui.direction.get(), "AI → Zwischenablage")
             self.assertEqual(self.ui.approve_button.cget("text"), "In Zwischenablage kopieren")
             self.assertFalse(self.ui.return_checkbox.winfo_ismapped())
-            with self.assertRaisesRegex(a.ProbeError, "stage_conflict"):
+            with self.assertRaisesRegex(a.ProbeError, "terminal_not_connected"):
                 self.core.set_command_target("TERMINAL")
             with self.assertRaisesRegex(a.ProbeError, "clipboard_target_requires_copy"):
                 self.core.approve(review.id)
@@ -228,7 +227,7 @@ class ConnectionDialogTests(unittest.TestCase):
         self.until(lambda: self.core.bridge_state == "CONNECTED")
         self.assertIsNone(self.core.channel)
         self.assertIsNone(self.core.session)
-        self.assertTrue(self.ui.from_terminal_button.instate(["disabled"]))
+        self.assertFalse(self.ui.from_terminal_button.instate(["disabled"]))
         self.root.clipboard_clear()
         self.root.clipboard_append("External text without terminal\n")
         self.ui.output_mode.set("Zwischenablage")
@@ -263,7 +262,7 @@ class ConnectionDialogTests(unittest.TestCase):
         with self.assertRaisesRegex(a.ProbeError, "terminal_not_connected"):
             self.core.select_output()
         with self.assertRaisesRegex(a.ProbeError, "terminal_not_connected"):
-            self.core.review_command("true")
+            self.core.review_command("true", target="TERMINAL")
         self.ui.output_mode.set("Letzte 20")
         self.ui.change_output_mode()
         self.assertTrue(self.ui.from_terminal_button.instate(["disabled"]))
@@ -303,6 +302,7 @@ class ConnectionDialogTests(unittest.TestCase):
 
     def test_pending_proposal_explains_terminal_gate_even_with_connected_bridge(self):
         self.core.start_local(self.tmp.name)
+        self.core.set_command_target("TERMINAL")
         proposal = self.core.add_proposal("printf 'review only'")
         bridge = a.replace(self.core.bridge_snapshot(), state="CONNECTED", mode="REMOTE",
                            target="https://127.0.0.1:8443", tunnel_phase="connected")
@@ -343,6 +343,7 @@ class ConnectionDialogTests(unittest.TestCase):
 
     def test_pending_proposal_explains_stage_and_transfer_gates(self):
         self.core.connection, self.core.session = "CONNECTED", "UI_TEST_SESSION"
+        self.core.set_command_target("TERMINAL")
         self.core.review_command("printf 'current review'")
         proposal = self.core.add_proposal("printf 'next review'")
         for state, reason in (("REVIEW", "Aktuellen Review freigeben oder verwerfen"),
@@ -420,6 +421,7 @@ class ConnectionDialogTests(unittest.TestCase):
         self.assertTrue(self.ui.reject_button.instate(["disabled"]))
         self.core.session = "HAND_BUTTON_TEST_SESSION"
         self.core.connection = "CONNECTED"
+        self.core.set_command_target("TERMINAL")
         review = self.core._output_review("selected output\n")
         self.ui.render()
         self.assertEqual(self.ui.approve_button.cget("text"), "Freigeben an AI →")
@@ -1006,6 +1008,7 @@ print(json.dumps(results))
                 self.assertEqual(ui.reject_button.cget("text"), "Verwerfen")
                 core.session = "TEXT_FALLBACK_SESSION"
                 core.connection = "CONNECTED"
+                core.set_command_target("TERMINAL")
                 core._output_review("reject this\n")
                 ui.render()
                 ui.reject_button.invoke()
@@ -1026,6 +1029,7 @@ class WorkPackageReviewUITests(unittest.TestCase):
         self.ui = a.ReviewUI(self.root, self.core)
         self.core.session = "SYNTHETIC_REVIEW_SESSION"
         self.core.connection = "CONNECTED"
+        self.core.set_command_target("TERMINAL")
         self.addCleanup(self.cleanup)
 
     def cleanup(self):
@@ -1349,6 +1353,7 @@ class StageConflictDialogTests(unittest.TestCase):
             if self.core.open_return is not None:
                 self.core.close_open_return()
             if self.core.connection == "CONNECTED" and self.core.channel:
+                self.core.set_command_target("TERMINAL")
                 review = self.core.review_command("exit", True)
                 self.core.approve(review.id)
                 self.until(lambda: self.core.connection == "DISCONNECTED", 3)
@@ -1438,6 +1443,37 @@ class StageConflictDialogTests(unittest.TestCase):
                 self.ui.from_terminal()
             self.assertIn("offene Prüfung", error.call_args.args[1])
             self.assertEqual(self.core.review, command)
+
+    def test_clipboard_source_reroutes_active_proposal_without_any_terminal_send(self):
+        with mock.patch.object(self.ui.messagebox, "showinfo") as info:
+            self.ui.from_terminal_button.invoke()
+        self.assertIn("Noch kein Command", info.call_args.args[1])
+        marker = Path(self.tmp.name, "must-not-execute-clipboard-mode")
+        self.submit(": > must-not-execute-clipboard-mode", "GUI_CLIPBOARD_ROUTE_0001")
+        self.take()
+        old = self.core.review
+        self.assertEqual(self.core.output_mode, "SINCE_LAST")
+        self.assertEqual(old.command_target, "TERMINAL")
+        self.root.clipboard_clear()
+        self.root.clipboard_append("UNCHANGED BEFORE APPROVAL")
+        with mock.patch.object(self.core.channel, "send", side_effect=AssertionError("terminal write")) as send:
+            self.ui.output_mode.set("Zwischenablage")
+            self.ui.change_output_mode()
+            self.assertEqual(self.core.review.command_target, "CLIPBOARD")
+            self.assertEqual(self.ui.command_target.get(), "Zwischenablage")
+            self.assertEqual(self.ui.approve_button.cget("text"), "In Zwischenablage kopieren")
+            self.assertNotEqual(self.core.review.id, old.id)
+            self.assertEqual(self.core.review.proposal_id, old.proposal_id)
+            self.assertEqual(self.root.clipboard_get(), "UNCHANGED BEFORE APPROVAL")
+            with self.assertRaisesRegex(a.ProbeError, "stale_review"):
+                self.core.approve(old.id)
+            self.ui.approve_button.invoke()
+            self.assertEqual(self.root.clipboard_get(), ": > must-not-execute-clipboard-mode")
+            self.assertEqual(self.core.review_state, "COPIED")
+            send.assert_not_called()
+        self.assertFalse(marker.exists())
+        self.assertIsNone(self.core.open_return)
+        self.assertIsNone(self.core.last_transfer_offset)
 
     def test_send_conflict_dialog_cancel_escape_and_waiver_send(self):
         self.submit("printf 'GUI_STAGE_A\\n'", "GUI_STAGE_A_REQ_0001")
@@ -1646,6 +1682,7 @@ class SentStylingUITests(unittest.TestCase):
     def cleanup(self):
         try:
             if self.core.connection == "CONNECTED" and self.core.channel:
+                self.core.set_command_target("TERMINAL")
                 review = self.core.review_command("exit", True)
                 self.core.approve(review.id)
                 self.until(lambda: self.core.connection == "DISCONNECTED", 3)

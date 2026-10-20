@@ -1,4 +1,4 @@
-# Admin in the Loop – v0.9.21 (persönliche Testversion)
+# Admin in the Loop – v0.9.22 (persönliche Testversion)
 
 **AI assists, Admin decides.**
 
@@ -8,7 +8,7 @@ Stand des beschriebenen MVP: 30. September 2026. Die bisherige lokale Integratio
 
 ## Versionen und Versionsregel
 
-Kanonische Version: `APP_VERSION` in `admin_in_the_loop.py` (aktuell **0.9.21**); die headless Bridge zeigt dieselbe Version (`BRIDGE_SERVER_INFO`, Konsolen-Startzeile) und der GUI-Fenstertitel führt sie ebenfalls. Jeder neue ausgelieferte Programmstand erhöht mindestens den Patch-Stand (keine undokumentierten Stände); `--version` gibt die Version zeilenweise aus. Tests pinnen die Konsistenz beider Kopien.
+Kanonische Version: `APP_VERSION` in `admin_in_the_loop.py` (aktuell **0.9.22**); die headless Bridge zeigt dieselbe Version (`BRIDGE_SERVER_INFO`, Konsolen-Startzeile) und der GUI-Fenstertitel führt sie ebenfalls. Jeder neue ausgelieferte Programmstand erhöht mindestens den Patch-Stand (keine undokumentierten Stände); `--version` gibt die Version zeilenweise aus. Tests pinnen die Konsistenz beider Kopien.
 
 Einzeldatei-Download und `update [GITHUB_USER [BRANCH]]` stehen im
 [Root-README](../README.md#einfach-aktualisieren). Standard ist GeektankLabs/main;
@@ -28,9 +28,14 @@ neu starten; siehe [Prüfnachweis](../doc/RELEASE_V0.9.20.md).
 
 Ab v0.9.21 gibt es rechts zusätzlich „Ziel für AI-Vorschläge → Zwischenablage“.
 Übernehmen, Risikoanalyse, Bearbeiten und ausdrückliches Kopieren funktionieren
-ohne Terminal. Quelle links und Ziel rechts werden unabhängig gewählt. Kopieren
+ohne Terminal. Ab v0.9.22 sind Quelle und Ziel gekoppelt; ohne Terminal ist Zwischenablage
+der Standard, nach Verbindung Terminal / Letzter Command. Kopieren
 ist keine Ausführung und erzeugt keine Terminalrückgabe; siehe [Ablauf und
 Prüfnachweis](../doc/RELEASE_V0.9.21.md).
+
+Beim manuellen Umschalten eines offenen Commands wird ein neuer Review erzeugt;
+das vorherige Freigabeobjekt wird ungültig. Ein automatischer Standardwechsel
+beim Terminalstart betrifft dagegen nur neue Vorgänge. [Prüfnachweis v0.9.22](../doc/RELEASE_V0.9.22.md).
 
 ## Dateien und Architektur
 
@@ -86,7 +91,7 @@ Das Controllerfenster startet groß im Querformat. **F11** schaltet Vollbild, **
 - Der Review hat weiche Zeilenumbrüche und ausschließlich eine vertikale Scrollbar. Die Umbrüche verändern den übertragenen Text nicht.
 - „Finales Return senden“ erscheint nur bei Commands. Beim ersten Start eingeschaltet, danach persistent nach Benutzerwahl. Interne Zeilenumbrüche können schon ohne finales Return Befehle ausführen; die Oberfläche weist darauf hin.
 - Blockgrößen **SINGLE, SMALL, MEDIUM, LARGE**; persistente Komfortpräferenz, keine Ausführungsberechtigung.
-- Ausgabeauswahl: **Letzte Zeile**, **Seit letztem Command**, **Letzte 20**, **Letzte 50**, **Letzte 100**, **Letzte 500**. Beim ersten Öffnen/Ausprobieren sind **Letzte 20** ausgewählt, damit unmittelbarer Terminal-Output sichtbar ist. Nach dem ersten bestätigten Transfer wechselt die Auswahl zu „Seit letztem Command“; danach bleibt die eigene Auswahl bestehen.
+- Ausgabeauswahl: **Zwischenablage**, **Letzter Command**, **Letzte Zeile**, **Letzte 20**, **Letzte 50**, **Letzte 100**, **Letzte 500**. Ohne Terminal ist Zwischenablage der Standard für Quelle und AI-Ziel; nach „Terminal bereit“ gilt Terminal / Letzter Command für neue Vorgänge. Ohne vorherige App-Command-Freigabe erklärt ein Hinweis die fehlende Command-Ausgabe; für manuelle Ausgaben einen Zeilenbereich wählen. Modusänderungen sind während Übernahme/Zustellung gesperrt. Ein manueller Wechsel eines offenen Commands erzeugt einen neuen Review.
 - Solange die Shell erfolgreich am Controller hängt, lautet der Status „Terminal verbunden“ und der nicht mehr benötigte Button „Terminal öffnen“ ist ausgeblendet. Während der Shell-Verbindung erscheint „Terminal verbindet“ und der Button ist deaktiviert. Nach Ende/Verlust erscheint „Terminal getrennt“; „Terminal öffnen“ legt für den nächsten Attach einen frischen einmaligen IPC-Endpunkt an.
 
 Probelauf ohne AI:

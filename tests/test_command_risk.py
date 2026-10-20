@@ -133,6 +133,7 @@ class FixtureTests(unittest.TestCase):
         self.core = a.AppCore()
         self.core.session = "RISK_TEST_SESSION"
         self.core.connection = "CONNECTED"
+        self.core.set_command_target("TERMINAL")
         self.core.channel = mock.Mock()
         self.core.channel.receive.return_value = []
         self.addCleanup(self.core.close)

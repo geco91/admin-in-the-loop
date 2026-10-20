@@ -44,13 +44,13 @@ from types import MappingProxyType
 # Kanonische Version (Journal 8.10.: jede ausgelieferte Codeaenderung erhoehrt
 # mindestens den Patch-Stand). BRIDGE_SERVER_INFO pflegt eine separate Kopie im
 # Bridge-Block; ein Konsistenztest pinnt beide auf denselben Wert.
-APP_VERSION = "0.9.21"
+APP_VERSION = "0.9.22"
 
 
 # Single canonical UI/CLI version. The embedded bridge block keeps its own copy in
 # BRIDGE_SERVER_INFO; a consistency test pins both to the same value (Journal #88ff:
 # every delivered program state bumps at least the patch digit).
-APP_VERSION = "0.9.21"
+APP_VERSION = "0.9.22"
 
 
 def _load_bridge_component(namespace=None):
@@ -1507,7 +1507,7 @@ COMMAND_TARGETS = {"TERMINAL": "Terminal", "CLIPBOARD": "Zwischenablage"}
 BLOCK_SIZES = ("SINGLE", "SMALL", "MEDIUM", "LARGE")
 OUTPUT_MODES = {
     "LAST_1": "Letzte Zeile",
-    "SINCE_LAST": "Seit letztem Command",
+    "SINCE_LAST": "Letzter Command",
     "LAST_20": "Letzte 20", "LAST_50": "Letzte 50",
     "LAST_100": "Letzte 100", "LAST_500": "Letzte 500",
     "CLIPBOARD": "Zwischenablage",
@@ -4387,11 +4387,11 @@ class AppCore:
         self.offsets = {}
         self.preferences = "SMALL"
         self.final_return = True
-        self.command_target = "TERMINAL"
+        self.command_target = "CLIPBOARD"
         self.preference_store = preference_store
         if preference_store is not None:
             self.final_return, self.preferences = preference_store.load()
-        self.output_mode = "LAST_20"
+        self.output_mode = "CLIPBOARD"
         self.last_transfer_offset = None
         self.approved_outputs = deque(maxlen=20)
         self.last_error = None
@@ -5294,7 +5294,7 @@ class AppCore:
         self.output = TranscriptRing()
         self.offsets.clear()
         self.last_transfer_offset = None
-        self.output_mode = "LAST_20"
+        self.output_mode = "CLIPBOARD"
         self.last_error = None
         return self.start_local(workdir)
 
@@ -5515,8 +5515,9 @@ class AppCore:
 
     def set_command_target(self, target):
         require(type(target) is str and target in COMMAND_TARGETS, "invalid_command_target")
-        self._require_free_stage()
-        self.command_target = target
+        mode = "CLIPBOARD" if target == "CLIPBOARD" else (
+            self.output_mode if self.output_mode != "CLIPBOARD" else "SINCE_LAST")
+        self.set_output_mode(mode)
 
     def review_command(self, text, final_return=None, target=None):
         target = self.command_target if target is None else target
@@ -5563,7 +5564,19 @@ class AppCore:
 
     def set_output_mode(self, mode):
         require(type(mode) is str and mode in OUTPUT_MODES, "invalid_output_mode")
-        require(mode != "SINCE_LAST" or self.last_transfer_offset is not None, "no_command_transferred")
+        require(self.review_state not in {"CHECKING", "TRANSFERRING", "SENDING", "DELIVERY_UNCERTAIN",
+                                          "TAKE_PENDING"} and self.pending_take is None,
+                "transfer_in_progress")
+        target = "CLIPBOARD" if mode == "CLIPBOARD" else "TERMINAL"
+        if self.review and self.review.direction == "TO_TERMINAL" \
+                and self.review_state in {"REVIEW", "OVERRIDE_REQUIRED"} \
+                and self.review.command_target != target:
+            previous = self.review
+            self._active(previous.id)
+            review = self.review_command(previous.text, target=target)
+            self.review = replace(review, proposal_id=previous.proposal_id, expires_at=previous.expires_at,
+                                  edited=previous.edited)
+        self.command_target = target
         self.output_mode = mode
 
     def select_clipboard(self, text):
@@ -5645,7 +5658,8 @@ class AppCore:
 
     def approve(self, identifier, override=False, submission_id=None, explicit_binding=False):
         self._active(identifier)
-        require(self.review.direction != "TO_TERMINAL" or self.review.command_target == "TERMINAL",
+        require(self.review.direction != "TO_TERMINAL" or (self.review.command_target == "TERMINAL"
+                and self.command_target == "TERMINAL" and self.output_mode != "CLIPBOARD"),
                 "clipboard_target_requires_copy")
         require(type(override) is bool, "override_type")
         require(type(explicit_binding) is bool, "invalid_binding_mode")
@@ -5788,6 +5802,9 @@ class AppCore:
             self.session = bounded_string(value["session"], 64)
             require(bool(re.fullmatch("[0-9a-f-]{36}", self.session)), "session_id")
             self.connection = "CONNECTED"
+            # Connection defaults apply to the next proposal. A staged clipboard
+            # review/pending take keeps its frozen destination and is never auto-sent.
+            self.command_target, self.output_mode = "TERMINAL", "SINCE_LAST"
         elif kind == "output":
             fields(value, {"type", "start", "data"})
             require(self.connection == "CONNECTED", "unexpected_output")
@@ -5846,6 +5863,7 @@ class AppCore:
         self.channel = None
         self.connection = "DISCONNECTED"
         self.session = None
+        self.command_target, self.output_mode = "CLIPBOARD", "CLIPBOARD"
         if self.review_state == "CHECKING":
             self.review_state = "TRANSFER_UNCERTAIN"
             if self.review is not None and self.review.direction == "TO_TERMINAL":
@@ -5876,7 +5894,7 @@ class AppCore:
         self.output = TranscriptRing()
         self.offsets.clear()
         self.last_transfer_offset = None
-        self.output_mode = "LAST_20"
+        self.output_mode = "CLIPBOARD"
         self.inbox.clear()
         self.approved_outputs.clear()
         self.review = None
@@ -9100,6 +9118,11 @@ class ReviewUI:
                 return
             self.action(core.take_return_review)
             return
+        if core.output_mode == "SINCE_LAST" and core.last_transfer_offset is None:
+            self.messagebox.showinfo("Noch keine Command-Ausgabe",
+                "Noch kein Command wurde aus dieser App ins Terminal freigegeben. "
+                "Für manuelle Terminalausgaben bitte einen Zeilenbereich wählen.", parent=self.root)
+            return
         self.action(core.select_current_output)
 
     def from_ai(self):
@@ -9256,8 +9279,8 @@ class ReviewUI:
         self.readiness.configure(text=proposal_status,
                                  background="#dcefe1" if can_review else "#f6e4d0",
                                  foreground="#285739" if can_review else "#75451b")
-        modes = [label for key, label in OUTPUT_MODES.items() if key != "SINCE_LAST" or snapshot.last_transfer_offset is not None]
-        self.output_picker.configure(values=modes)
+        self.output_picker.configure(values=tuple(OUTPUT_MODES.values()),
+                                     state="disabled" if busy else "readonly")
         self.output_mode.set(OUTPUT_MODES[snapshot.output_mode])
         self.preference.set(snapshot.preferences)
         self.final_return.set(snapshot.final_return)
@@ -9649,6 +9672,7 @@ class LocalIntegrationTests(unittest.TestCase):
         with self.assertRaises(ProbeError):
             self.core.approve(review.id)
         self.core.reject(changed.id)
+        self.core.set_output_mode("LAST_20")
         output = self.core.select_current_output()
         self.assertFalse(output.final_return)
         next_review = self.core.review_command(marker_command("RETURN_STAYS_OFF"))
@@ -9656,10 +9680,11 @@ class LocalIntegrationTests(unittest.TestCase):
         self.assertFalse(self.core.snapshot().final_return)
         self.assertFalse(Path(self.tmp.name, "preference-marker").exists())
 
-    def test_output_default_last_twenty_then_since_confirmed_transfer(self):
-        self.assertEqual(self.core.snapshot().output_mode, "LAST_20")
-        with self.assertRaises(ProbeError):
-            self.core.set_output_mode("SINCE_LAST")
+    def test_output_defaults_to_last_command_and_allows_explicit_line_range(self):
+        self.assertEqual(self.core.snapshot().output_mode, "SINCE_LAST")
+        with self.assertRaisesRegex(ProbeError, "no_command_transferred"):
+            self.core.select_current_output()
+        self.core.set_output_mode("LAST_20")
         self.fixture.manual("for i in {0..29}; do echo DEFAULT_RANGE_$i; done\n")
         def default_output_complete():
             data = bytes(self.core.output.data)
@@ -9908,7 +9933,7 @@ BRIDGE_RETENTION = 24 * 3600
 BRIDGE_OUTPUT_LIMIT = 64 * 1024
 BRIDGE_BLOCK_SIZES = ("SINGLE", "SMALL", "MEDIUM", "LARGE")
 BRIDGE_VERSIONS = ("2026-07-28", "2025-11-25", "2025-06-18", "2025-03-26")
-BRIDGE_SERVER_INFO = {"name": "admin-in-the-loop", "version": "0.9.21"}
+BRIDGE_SERVER_INFO = {"name": "admin-in-the-loop", "version": "0.9.22"}
 BRIDGE_BASE32 = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 # M9 Folgeaenderung (Operator-Journal 100): pairing-code validity 10 minutes; the
 # attempt limit (5), claim-path cooldown and the separate PAIR_PENDING token lifetime
