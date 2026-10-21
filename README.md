@@ -16,7 +16,7 @@ weitergegeben. Das Terminal bleibt unabhängig manuell bedienbar.
 
 ## Aktuelle persönliche Testversion
 
-**Aktuelle persönliche Testversion: v0.9.22 mit automatischem Zwischenablage-Fallback und gemeinsamer Moduswahl.**
+**Aktuelle persönliche Testversion: v0.9.23 ohne zusätzliche Titelzeile innerhalb der Oberfläche.**
 Links im Terminalbereich wird die Rückgabeprüfung eingestellt, rechts im AI-Bereich
 die Befehlsprüfung. Die Mitte bleibt für Code/Ausgabe und die passenden Prüfreiter
 mit Ampel und Befundzahl frei. [Echte Beispielansichten](doc/REVIEW_LAYOUT.md).
@@ -57,15 +57,15 @@ State-Verzeichnis neu starten. Gespeicherte Kopplung und Credentials bleiben erh
 
 ## Herunterladen und ausprobieren
 
-[Python-Datei v0.9.22 herunterladen](https://raw.githubusercontent.com/geco91/admin-in-the-loop/refs/tags/v0.9.22/admin_in_the_loop.py) ·
-[Gesamtes Repository als ZIP](https://github.com/geco91/admin-in-the-loop/archive/refs/tags/v0.9.22.zip)
+[Python-Datei v0.9.23 herunterladen](https://raw.githubusercontent.com/geco91/admin-in-the-loop/refs/tags/v0.9.23/admin_in_the_loop.py) ·
+[Gesamtes Repository als ZIP](https://github.com/geco91/admin-in-the-loop/archive/refs/tags/v0.9.23.zip)
 
 Die einzelne Python-Datei genügt für die Anwendung; Tests und Dokumentation
 liegen zusätzlich im ZIP. In einem eigenen, leeren Verzeichnis herunterladen:
 
 ```bash
 curl --fail --location --proto '=https' --tlsv1.2 \
-  https://raw.githubusercontent.com/geco91/admin-in-the-loop/refs/tags/v0.9.22/admin_in_the_loop.py \
+  https://raw.githubusercontent.com/geco91/admin-in-the-loop/refs/tags/v0.9.23/admin_in_the_loop.py \
   --output admin_in_the_loop.py
 python3 admin_in_the_loop.py
 ```

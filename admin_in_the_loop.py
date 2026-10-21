@@ -44,13 +44,13 @@ from types import MappingProxyType
 # Kanonische Version (Journal 8.10.: jede ausgelieferte Codeaenderung erhoehrt
 # mindestens den Patch-Stand). BRIDGE_SERVER_INFO pflegt eine separate Kopie im
 # Bridge-Block; ein Konsistenztest pinnt beide auf denselben Wert.
-APP_VERSION = "0.9.22"
+APP_VERSION = "0.9.23"
 
 
 # Single canonical UI/CLI version. The embedded bridge block keeps its own copy in
 # BRIDGE_SERVER_INFO; a consistency test pins both to the same value (Journal #88ff:
 # every delivered program state bumps at least the patch digit).
-APP_VERSION = "0.9.22"
+APP_VERSION = "0.9.23"
 
 
 def _load_bridge_component(namespace=None):
@@ -7941,7 +7941,7 @@ class ReviewUI:
         root.geometry("%dx%d+0+0" % (width, height))
         root.minsize(960, 560)
         root.columnconfigure(0, weight=1)
-        root.rowconfigure(1, weight=1)
+        root.rowconfigure(0, weight=1)
         root.bind("<F11>", lambda _: root.attributes("-fullscreen", not root.attributes("-fullscreen")))
         root.bind("<Escape>", lambda _: root.attributes("-fullscreen", False))
         style = ttk.Style(root)
@@ -7949,15 +7949,8 @@ class ReviewUI:
         self.logo_variant = _logo_variant(root, base)
         self.section_images = {}
         self.section_logo_labels = {}
-        self.header_bar = ttk.Frame(root)
-        self.header_bar.grid(row=0, column=0, sticky="ew", padx=16, pady=(8, 4))
-        self.header_bar.columnconfigure(1, weight=1)
-        self.logo_label = ttk.Label(self.header_bar, text="Admin in the Loop",
-                                    font=("TkDefaultFont", 13))
-        self.logo_label.grid(row=0, column=0, sticky="w")
-        ttk.Frame(self.header_bar).grid(row=0, column=1, sticky="nsew")
         self.layout = ttk.Frame(root, padding=12)
-        self.layout.grid(row=1, column=0, sticky="nsew")
+        self.layout.grid(row=0, column=0, sticky="nsew")
         self.layout.rowconfigure(0, weight=1)
         rgb = tuple(value // 256 for value in root.winfo_rgb(base))
         shift = -1 if sum(rgb) > 384 else 1
@@ -9933,7 +9926,7 @@ BRIDGE_RETENTION = 24 * 3600
 BRIDGE_OUTPUT_LIMIT = 64 * 1024
 BRIDGE_BLOCK_SIZES = ("SINGLE", "SMALL", "MEDIUM", "LARGE")
 BRIDGE_VERSIONS = ("2026-07-28", "2025-11-25", "2025-06-18", "2025-03-26")
-BRIDGE_SERVER_INFO = {"name": "admin-in-the-loop", "version": "0.9.22"}
+BRIDGE_SERVER_INFO = {"name": "admin-in-the-loop", "version": "0.9.23"}
 BRIDGE_BASE32 = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 # M9 Folgeaenderung (Operator-Journal 100): pairing-code validity 10 minutes; the
 # attempt limit (5), claim-path cooldown and the separate PAIR_PENDING token lifetime

@@ -391,9 +391,8 @@ class ConnectionDialogTests(unittest.TestCase):
                 graphic = self.ui.section_logo_labels[section]
                 self.assertTrue(graphic.winfo_ismapped())
                 self.assertIs(graphic.master.master.master, panel)
-            self.assertGreater(self.ui.header_bar.winfo_width() - self.ui.logo_label.winfo_width(), 600)
-            self.assertGreater(self.ui.layout.winfo_rooty(),
-                               self.ui.header_bar.winfo_rooty() + self.ui.header_bar.winfo_height() - 1)
+            self.assertEqual(self.ui.layout.winfo_rooty(), self.root.winfo_rooty())
+            self.assertEqual(self.root.title(), "Admin in the Loop · v" + a.APP_VERSION)
         base = ttk.Style(self.root).lookup("TFrame", "background") or self.root.cget("background")
         self.assertEqual(self.ui.logo_variant, a._logo_variant(self.root, base))
         left, center, right = self.ui.panels
@@ -918,7 +917,7 @@ for variant, background in (("light", "#ffffff"), ("dark", "#101010")):
         assert graphic.master.master.master is panel
         assert graphic.winfo_rooty() < ui.status_labels[0 if section == "terminal" else 1][0].winfo_rooty()
         assert image.transparency_get(0, 0) == (variant == "dark")
-    assert ui.logo_label.cget("text") == "Admin in the Loop"
+    assert root.title() == "Admin in the Loop · v" + app.APP_VERSION
     for name, button in (("ok", ui.approve_button), ("stop", ui.reject_button)):
         image = ui.button_hand_images[name]
         assert image is not None and (image.width(), image.height()) == (24, 24)
@@ -926,7 +925,7 @@ for variant, background in (("light", "#ffffff"), ("dark", "#101010")):
         assert tuple(map(str, root.tk.splitlist(button.cget("image")))) == (str(image),)
         assert str(button.cget("compound")) == "left" and button.winfo_ismapped()
         assert button.instate(["disabled"])
-    assert ui.header_bar.winfo_width() - ui.logo_label.winfo_width() > 600
+    assert ui.layout.winfo_rooty() == root.winfo_rooty()
     for width in (960, 1100, 1360):
         root.geometry("%dx600" % width)
         root.update()
@@ -980,8 +979,8 @@ print(json.dumps(results))
                 root.update()
                 self.assertEqual(ui.section_images, {"terminal": None, "ai": None})
                 self.assertEqual(ui.section_logo_labels, {})
-                self.assertEqual(ui.logo_label.cget("text"), "Admin in the Loop")
-                self.assertTrue(ui.logo_label.winfo_ismapped())
+                self.assertEqual(root.title(), "Admin in the Loop · v" + a.APP_VERSION)
+                self.assertEqual(ui.layout.winfo_rooty(), root.winfo_rooty())
                 for label, _ in ui.status_labels:
                     titles = [child.cget("text") for child in label.master.winfo_children()
                               if child.winfo_class() == "TLabel" and not str(child.cget("textvariable"))]

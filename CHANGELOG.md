@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.9.23 — Zusätzliche Titelzeile entfernen
+
+- Die zusätzliche Überschrift „Admin in the Loop“ innerhalb des Hauptfensters
+  entfällt. Die drei Arbeitsbereiche nutzen die frei gewordene Höhe; der native
+  Fenstertitel mit Versionsnummer bleibt erhalten.
+- Geprüft mit den bestehenden Layout-/Einzeldatei-GUI-Fällen bei mehreren
+  Fensterbreiten und beiden Farbschemata. [Prüfnachweis](doc/RELEASE_V0.9.23.md).
+
 ## 0.9.22 — Gemeinsamer Zwischenablage-/Terminalmodus
 
 - Ohne Terminal sind Rückgabequelle und AI-Ziel standardmäßig Zwischenablage;
