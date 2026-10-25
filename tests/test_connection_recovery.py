@@ -1,5 +1,6 @@
 """Startup recovery: real pinned TLS plus controlled Qrexec lifecycle fixtures."""
 import os
+import queue
 import sys
 import tempfile
 import threading
@@ -31,6 +32,112 @@ class RecoveryTests(unittest.TestCase):
         self.store = a.ConnectionStore(Path(self.temp.name) / "config")
         self.core = a.AppCore(connection_store=self.store)
         self.addCleanup(self.core.close)
+
+    def restored_chat(self, expired=True):
+        """Real binding lifecycle, controlled transport/tunnel; no external access."""
+        now = time.time()
+        store = a.BridgeStore(Path(self.temp.name) / "binding", "c" * 32, clock=lambda: now)
+        self.addCleanup(store.close)
+        token, controller = store.issue("CONTROLLER")
+        if expired:
+            now += a.BRIDGE_CHAT_LIFETIME + 1
+        core = self.core
+        core.bridge_profile = a.ConnectionProfile("https://127.0.0.1:8443", "a" * 64,
+                                                  store.conversation, controller, token)
+        core.bridge_instance = store.instance
+        core.bridge_state = "CONNECTED"
+        core.bridge_worker = mock.Mock(events=queue.Queue(), stop=threading.Event())
+        core.recovery_state = "CONNECTING"
+        with mock.patch.object(core, "begin_tunnel_probe"):
+            core._pump_connection_recovery()
+        core.remote_tunnel_instance = store.instance
+        core.remote_tunnel = {"phase": "connected", "received_at": time.monotonic()}
+        core.chat_binding = store.chat_binding_status(controller)
+        core.chat_binding_received_at = time.monotonic()
+        return store, controller
+
+    def test_expired_startup_code_rotates_once_and_is_visible_without_dialog(self):
+        store, controller = self.restored_chat()
+        core = self.core
+        core._pump_recovered_chat_binding()
+        core._pump_recovered_chat_binding()
+        worker = core.bridge_worker
+        worker.post.assert_called_once()
+        name, (request, generation) = worker.post.call_args.args
+        self.assertEqual(name, "rotate_chat_binding")
+        self.assertFalse(a.chat_binding_presentation(core.bridge_snapshot())[2])
+        result = store.rotate_chat_binding(request, generation, controller)
+        worker.events.put((core.worker_id, "chat_binding", result))
+        core._pump_bridge()
+        code, _, can_copy = a.chat_binding_presentation(core.bridge_snapshot())
+        self.assertEqual(code.replace("-", ""), result["code"])
+        self.assertTrue(can_copy)
+        self.assertEqual(result["generation"], generation + 1)
+        # The worker's retry uses the same request, and the server does not rotate twice.
+        self.assertEqual(store.rotate_chat_binding(request, generation, controller), result)
+        with mock.patch.object(a, "BridgeWorker", return_value=worker):
+            core.reconnect_bridge()
+        core.bridge_state, core.bridge_instance = "CONNECTED", store.instance
+        core.chat_binding = result
+        core.chat_binding_received_at = time.monotonic()
+        core._pump_recovered_chat_binding()
+        worker.post.assert_called_once()
+
+    def test_valid_and_restricted_codes_are_preserved_even_if_they_expire_later(self):
+        self.restored_chat(expired=False)
+        for status in ("VALID", "LOCKED", "BACKOFF"):
+            with self.subTest(status=status):
+                self.core.recovery_chat_checked = False
+                self.core.chat_binding["status"] = status
+                self.core._pump_recovered_chat_binding()
+                self.core.chat_binding["status"] = "EXPIRED"
+                self.core._pump_recovered_chat_binding()
+                self.core.bridge_worker.post.assert_not_called()
+
+    def test_startup_rotation_waits_for_fresh_matching_ready_state(self):
+        self.restored_chat()
+        core = self.core
+        cases = [("bridge_state", "CONNECTING"), ("chat_binding", None),
+                 ("chat_binding_received_at", time.monotonic() - 7),
+                 ("chat_binding_busy", True), ("recovery_chat_recipient", None),
+                 ("recovery_chat_recipient", ("other",)),
+                 ("remote_tunnel_instance", "other"), ("remote_tunnel", None)]
+        cases += [("remote_tunnel", {"phase": phase, "received_at": time.monotonic()})
+                  for phase in ("missing", "configured", "installing", "starting", "error")]
+        cases += [("remote_tunnel", {"phase": "connected", "received_at": time.monotonic() - 7})]
+        for attr, value in cases:
+            with self.subTest(attr=attr, value=value), mock.patch.object(core, attr, value):
+                core._pump_recovered_chat_binding()
+                core.bridge_worker.post.assert_not_called()
+        core._pump_recovered_chat_binding()
+        core.bridge_worker.post.assert_called_once()
+
+    def test_failed_or_uncertain_rotation_is_not_repeated_by_refresh_or_reconnect(self):
+        self.restored_chat()
+        core = self.core
+        expired = core.chat_binding
+        core._pump_recovered_chat_binding()
+        worker = core.bridge_worker
+        worker.events.put((core.worker_id, "chat_binding_error", "network_timeout"))
+        worker.events.put((core.worker_id, "chat_binding", expired))
+        core._pump_bridge()
+        core._pump_recovered_chat_binding()
+        self.assertIn("nicht bestätigt", a.chat_binding_presentation(core.bridge_snapshot())[1])
+        with mock.patch.object(a, "BridgeWorker", return_value=worker):
+            core.reconnect_bridge()
+        core.bridge_state = "CONNECTED"
+        core.chat_binding, core.chat_binding_received_at = expired, time.monotonic()
+        core._pump_recovered_chat_binding()
+        worker.post.assert_called_once()
+
+    def test_manual_rotation_consumes_startup_attempt_and_disconnect_cancels_it(self):
+        self.restored_chat()
+        self.core.rotate_chat_binding()
+        self.core.chat_binding_busy = False
+        self.core._pump_recovered_chat_binding()
+        self.core.bridge_worker.post.assert_called_once()
+        self.core.disconnect_bridge()
+        self.assertIsNone(self.core.recovery_chat_recipient)
 
     def test_no_saved_configuration_and_manual_connection_are_left_alone(self):
         with mock.patch.object(self.core, "connect_profile") as connect:
