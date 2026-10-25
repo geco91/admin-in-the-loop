@@ -4402,6 +4402,8 @@ class AppCore:
         self.recovery_started = False
         self.recovery_state = "IDLE"
         self.recovery_error = None
+        self.recovery_chat_recipient = None
+        self.recovery_chat_checked = False
         # M9: Main owns exactly one qvm-connect-tcp forwarder; config survives via
         # the connection store, the process itself is volatile and restarted on demand.
         self.qrexec_forwarder = QrexecForwarder()
@@ -4681,7 +4683,7 @@ class AppCore:
         self.bridge_process = process
 
     def begin_connection_recovery(self):
-        """Once per GUI start: reuse saved trust, never pair or rotate a chat code."""
+        """Once per GUI start: reuse saved trust without new pairing."""
         if self.recovery_started or self.bridge_state != "DISCONNECTED" or self.local_setup is not None:
             return
         self.recovery_started = True
@@ -4738,11 +4740,35 @@ class AppCore:
                 if self.bridge_profile.mode == "LOCAL" and self.local_setup_state != "CONNECTED":
                     return  # Local restoration includes the validated tunnel, not just HTTP.
                 self.recovery_state = "RESTORED"
+                if self.bridge_profile.mode == "REMOTE":
+                    self.recovery_chat_recipient = self.bridge_profile.recipient
                 if self.bridge_profile.mode == "REMOTE" and self.remote_tunnel_probe is None:
                     self.begin_tunnel_probe()
             elif self.bridge_state == "BLOCKED" or self.local_setup_state == "FAILED":
                 self.recovery_state = "NEEDS_ATTENTION"
                 self.recovery_error = self.bridge_error or self.local_setup_error
+
+    def _pump_recovered_chat_binding(self):
+        """One startup decision, using fresh authenticated server state only."""
+        if (self.recovery_chat_checked or self.recovery_chat_recipient is None
+                or self.bridge_state != "CONNECTED" or self.bridge_worker is None
+                or self.bridge_profile.recipient != self.recovery_chat_recipient
+                or self.chat_binding_busy or self.chat_binding is None
+                or self.chat_binding_received_at is None
+                or time.monotonic() - self.chat_binding_received_at > 6):
+            return
+        if self.chat_binding["status"] != "EXPIRED":
+            # Preserve valid codes, including backoff/lockout. No later timer rotation.
+            self.recovery_chat_checked = True
+            return
+        tunnel = self.remote_tunnel or {}
+        if (self.remote_tunnel_instance != self.bridge_instance
+                or tunnel.get("phase") != "connected"
+                or time.monotonic() - tunnel.get("received_at", 0) > 6):
+            return
+        # Consume before posting; reconnects and uncertain replies must not start
+        # another rotation. The worker retains its existing idempotent retry.
+        self.rotate_chat_binding()
 
     def retry_connection_recovery(self):
         require(self.recovery_preparation is None, "setup_busy")
@@ -4767,6 +4793,7 @@ class AppCore:
         self.connect_profile(ConnectionProfile(**self.saved_connection["profile"]))
 
     def disconnect_bridge(self):
+        self.recovery_chat_recipient = None
         self.recovery_profile = None
         if self.recovery_preparation is not None:
             self.recovery_preparation.close()
@@ -4800,6 +4827,7 @@ class AppCore:
     def rotate_chat_binding(self):
         require(self.bridge_state == "CONNECTED" and self.bridge_worker is not None, "bridge_disconnected")
         require(self.chat_binding is not None and not self.chat_binding_busy, "chat_binding_unavailable")
+        self.recovery_chat_checked = True
         self.bridge_worker.post("rotate_chat_binding", (uuid.uuid4().hex, self.chat_binding["generation"]))
         self.chat_binding_busy = True
         self.chat_binding_error = None
@@ -5251,7 +5279,8 @@ class AppCore:
                     self.chat_binding = value
                     self.chat_binding_received_at = time.monotonic()
                     self.chat_binding_busy = False
-                    self.chat_binding_error = None
+                    if value["status"] != "EXPIRED" or self.chat_binding_error == "chat_binding_unavailable":
+                        self.chat_binding_error = None
                     self.chat_binding_notice = None
                 elif kind == "chat_binding_unavailable":
                     self.chat_binding = None
@@ -5776,6 +5805,7 @@ class AppCore:
             self._pump_bridge()
             self._pump_connection_recovery()
             self._pump_tunnel_probe()
+            self._pump_recovered_chat_binding()
         except (ProbeError, OSError) as exc:
             self.bridge_error = str(exc) if isinstance(exc, ProbeError) else "network_failure"
             self.disconnect_bridge()
@@ -6098,6 +6128,10 @@ def chat_binding_presentation(bridge):
     binding = bridge.chat_binding
     if bridge.state != "CONNECTED":
         return "", "Verbindung getrennt · Chat-Code ausgeblendet", False
+    if bridge.chat_binding_busy:
+        return "", "Neuer Chat-Code wird erzeugt…", False
+    if bridge.chat_binding_error and bridge.chat_binding_error != "chat_binding_unavailable":
+        return "", "Code-Erneuerung nicht bestätigt · Status prüfen; ggf. im Verbindungsdialog erneut versuchen", False
     if binding is None or bridge.chat_binding_received_at is None:
         error = " · Status nicht verfügbar" if bridge.chat_binding_error else ""
         return "", "Chat-Code wird geprüft" + error, False
