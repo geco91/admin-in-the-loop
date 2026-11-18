@@ -968,7 +968,7 @@ class ConnectedRoundTripTests(unittest.TestCase):
         other = mcp(self.process, "get_approved_output", {"submission_id": first})["outputs"]
         self.assertEqual(other, [])
         general = mcp(self.process, "get_approved_output")["outputs"]
-        self.assertEqual([item["submission_id"] for item in general], [second])
+        self.assertEqual(general, [])
 
     def test_explicit_unbound_binding_ignores_last_submission(self):
         first = self.submit("printf 'EXPBIND_A\\n'")

@@ -3,12 +3,15 @@
 Local HTTP/MCP fixtures only; no hosted tunnel or production state.
 """
 import base64
+import http.client
 import json
 import sqlite3
 import sys
 import tempfile
+import threading
 import unittest
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest import mock
 
@@ -32,12 +35,14 @@ class ChatBindingReviewFixTests(unittest.TestCase):
         self.secret = "whsec_" + base64.b64encode(b"r" * 24).decode()
         self.store.on_new_output = None
 
-    def rpc(self, method, params, ai=None):
+    def rpc(self, method, params, ai=None, *, modern=True):
         value = {"jsonrpc": "2.0", "id": uuid.uuid4().hex, "method": method, "params": dict(params)}
-        value["params"]["_meta"] = {"io.modelcontextprotocol/protocolVersion": "2026-07-28",
-                                   "io.modelcontextprotocol/clientCapabilities": {}}
-        status, raw = request(self.harness.mcp_url, "POST", body=value, headers={
-            "X-AITL-AI-Key": ai or self.ai, "MCP-Protocol-Version": "2026-07-28"})
+        headers = {"X-AITL-AI-Key": ai or self.ai}
+        if modern:
+            value["params"]["_meta"] = {"io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                                       "io.modelcontextprotocol/clientCapabilities": {}}
+            headers["MCP-Protocol-Version"] = "2026-07-28"
+        status, raw = request(self.harness.mcp_url, "POST", body=value, headers=headers)
         self.assertEqual(status, 200)
         return json.loads(raw)
 
@@ -46,9 +51,9 @@ class ChatBindingReviewFixTests(unittest.TestCase):
             "arguments": {"conversation": code},
             "delivery": {"mode": "webhook", "url": self.url, "secret": self.secret}})["result"]["id"]
 
-    def output_tool(self, arguments=None, name="get_approved_output", ai=None, code=None):
+    def output_tool(self, arguments=None, name="get_approved_output", ai=None, code=None, *, modern=True):
         return self.rpc("tools/call", {"name": name, "arguments": dict(arguments or {},
-                        conversation=self.code if code is None else code)}, ai=ai)["result"]
+                        conversation=self.code if code is None else code)}, ai=ai, modern=modern)["result"]
 
     def shared_output(self, content="synthetic approved text", bound=False):
         submission = self.store.submit({"request_id": uuid.uuid4().hex, "text": "true"})["submission_id"] if bound else None
@@ -61,65 +66,125 @@ class ChatBindingReviewFixTests(unittest.TestCase):
         return self.output_tool({"output_id": item["output_id"], "receipt": item["receipt"]},
                                 name="acknowledge_output", **kwargs)
 
-    def test_read_ack_is_required_idempotent_and_retains_named_history(self):
+    def pending_read(self, arguments=None, *, ai=None):
+        # Store selection before HTTP writes the response, for receipt validation tests.
+        principal = self.store.authenticate(ai or self.ai, "AI")
+        return self.store.ai_output(principal, arguments or {})
+
+    def test_new_chat_pulls_latest_once_without_needing_ack_tool_or_cursor(self):
+        older, older_submission = self.shared_output("older approved text", bound=True)
+        newest, submission = self.shared_output("latest approved text", bound=True)
+        response = self.output_tool(modern=False)
+        page = response["structuredContent"]
+        item, = page["outputs"]
+        self.assertEqual(item["output_id"], newest)
+        self.assertEqual(response["content"][item["text_content_index"]]["text"], "latest approved text")
+        self.harness.wait(lambda: not self.store.submission_status(submission)["approved_output_available"])
+        self.assertTrue(self.store.submission_status(submission)["output_shared_ever"])
+
+        second_ai, _ = self.store.issue("AI")
+        for arguments in ({}, {"submission_id": submission}, {"output_id": newest}):
+            for token in (self.ai, second_ai):
+                with self.subTest(arguments=arguments, same_token=token == self.ai):
+                    self.assertEqual(self.output_tool(arguments, ai=token)["structuredContent"]["outputs"], [])
+        self.assertEqual(self.store.execute("SELECT text FROM outputs WHERE id=?", (newest,)).fetchone()[0], "")
+        self.assertTrue(self.store.submission_status(older_submission)["approved_output_available"])
+        targeted = self.output_tool({"submission_id": older_submission})["structuredContent"]
+        self.assertEqual(targeted["outputs"][0]["output_id"], older)
+        fresh, _ = self.shared_output("freshly approved text")
+        following = self.output_tool({"cursor": page["cursor"]})["structuredContent"]
+        self.assertEqual(following["outputs"][0]["output_id"], fresh)
+
+    def test_parallel_read_reserves_one_response_and_interrupted_write_leaves_text_pending(self):
+        respond = a.BridgeRequestHandler._respond
+        for successful_write in (True, False):
+            with self.subTest(successful_write=successful_write):
+                identifier, _ = self.shared_output()
+                writing, release = threading.Event(), threading.Event()
+
+                def pause_response(handler, status, value=None):
+                    if (value or {}).get("result", {}).get("structuredContent", {}).get("outputs"):
+                        writing.set()
+                        if not release.wait(5):
+                            raise TimeoutError("fixture stalled")
+                        if not successful_write:
+                            with mock.patch.object(handler, "end_headers", side_effect=BrokenPipeError):
+                                return respond(handler, status, value)
+                    return respond(handler, status, value)
+
+                with ThreadPoolExecutor(max_workers=1) as executor, \
+                        mock.patch.object(a.BridgeRequestHandler, "_respond", pause_response):
+                    pending = executor.submit(self.output_tool)
+                    try:
+                        self.assertTrue(writing.wait(5))
+                        request_by_id = self.output_tool({"output_id": identifier})["structuredContent"]
+                        self.assertEqual(request_by_id["outputs"], [])
+                    finally:
+                        release.set()
+                    if successful_write:
+                        self.assertEqual(pending.result(timeout=5)["structuredContent"]["outputs"][0]["output_id"],
+                                         identifier)
+                    else:
+                        with self.assertRaises(http.client.RemoteDisconnected):
+                            pending.result(timeout=5)
+                self.assertTrue(self.harness.service.wait_idle())
+                retry = self.output_tool()["structuredContent"]["outputs"]
+                self.assertEqual([item["output_id"] for item in retry], [] if successful_write else [identifier])
+
+    def test_read_ack_still_idempotent_and_controller_retry_never_restores_text(self):
         identifier, submission = self.shared_output(bound=True)
         first = self.output_tool()["structuredContent"]["outputs"][0]
-        retry = self.output_tool()["structuredContent"]["outputs"][0]  # lost first response
-        self.assertEqual(first, retry)
-        self.assertTrue(self.store.submission_status(submission)["approved_output_available"])
         for _ in range(2):  # includes a lost ACK response
             self.assertEqual(self.acknowledge(first)["structuredContent"]["state"], "ACKNOWLEDGED")
         self.assertEqual(self.output_tool()["structuredContent"]["outputs"], [])
         self.assertFalse(self.store.submission_status(submission)["approved_output_available"])
         for arguments in ({"output_id": identifier}, {"submission_id": submission}):
-            named = self.output_tool(arguments)["structuredContent"]["outputs"][0]
-            self.assertTrue(named["acknowledged"])
-        self.assertEqual(self.store.execute("SELECT text FROM outputs WHERE id=?", (identifier,)).fetchone()[0],
-                         "synthetic approved text")
+            self.assertEqual(self.output_tool(arguments)["structuredContent"]["outputs"], [])
         key = self.store.execute("SELECT idem FROM outputs WHERE id=?", (identifier,)).fetchone()[0]
         self.assertEqual(self.store.approved_output({"version": 1, "conversation": self.store.conversation,
             "idempotency_key": key, "text": "synthetic approved text", "submission_id": submission,
             "approved_at": self.now})["output_id"], identifier)
+        self.assertEqual(self.store.execute("SELECT text FROM outputs WHERE id=?", (identifier,)).fetchone()[0], "")
         self.assertEqual(self.output_tool()["structuredContent"]["outputs"], [])
         self.now += a.BRIDGE_RETENTION + 1
         self.store.cleanup()
         self.assertIsNone(self.store.execute("SELECT id FROM outputs WHERE id=?", (identifier,)).fetchone())
 
-    def test_expired_unknown_and_legacy_cursor_reset_only_over_unacknowledged_outputs(self):
+    def test_expired_unknown_and_legacy_cursor_reset_to_latest_pending_output(self):
         first, _ = self.shared_output("first")
-        second, _ = self.shared_output("second")
         page = self.output_tool()["structuredContent"]
-        self.acknowledge(page["outputs"][0])
-        later = self.output_tool({"cursor": page["cursor"]})["structuredContent"]
+        self.assertEqual(page["outputs"][0]["output_id"], first)
+        second, _ = self.shared_output("second")
+        later = self.pending_read({"cursor": page["cursor"]})
         self.assertEqual(later["outputs"][0]["output_id"], second)
         self.store.execute("UPDATE cursors SET expires=? WHERE id=?", (self.now, later["cursor"]))
         for cursor in (later["cursor"], uuid.uuid4().hex, self.store.cursor(self.aid, "OUTPUT", 9999)):
-            reset = self.output_tool({"cursor": cursor})["structuredContent"]
+            reset = self.pending_read({"cursor": cursor})
             self.assertTrue(reset["cursor_reset"])
             self.assertEqual(reset["outputs"][0]["output_id"], second)
-            self.assertNotEqual(reset["outputs"][0]["output_id"], first)
 
-    def test_ack_and_unconfirmed_read_survive_real_store_restart_and_cycle_cursor_reset(self):
-        self.shared_output("confirmed")
-        second, _ = self.shared_output("unconfirmed")
+    def test_delivered_and_pending_output_survive_restart_and_cycle_cursor_reset(self):
+        first, _ = self.shared_output("delivered")
         page = self.output_tool()["structuredContent"]
-        self.acknowledge(page["outputs"][0])
-        unread = self.output_tool({"cursor": page["cursor"]})["structuredContent"]
+        self.assertTrue(self.harness.service.wait_idle())
+        second, _ = self.shared_output("still pending")
+        unread = self.pending_read({"cursor": page["cursor"]})
         reopened = a.BridgeStore(self.temp.name, self.store.conversation, clock=lambda: self.now, new_cycle=True)
         self.addCleanup(reopened.close)
         principal = reopened.authenticate(self.ai, "AI")
         reset = reopened.ai_output(principal, {"cursor": unread["cursor"]})
         self.assertTrue(reset["cursor_reset"])
         self.assertEqual(reset["outputs"][0]["output_id"], second)
+        self.assertEqual(reopened.ai_output(principal, {"output_id": first})["outputs"], [])
         confirmed = page["outputs"][0]
         self.assertEqual(reopened.acknowledge_output(principal,
             {"output_id": confirmed["output_id"], "receipt": confirmed["receipt"]}, 1)["state"], "ACKNOWLEDGED")
 
-    def test_clients_share_unread_queue_but_cannot_use_each_others_read_receipts(self):
+    def test_clients_cannot_use_each_others_read_receipts(self):
         identifier, _ = self.shared_output()
-        second_ai, second_id = self.store.issue("AI")
-        first = self.output_tool()["structuredContent"]["outputs"][0]
-        second = self.output_tool(ai=second_ai)["structuredContent"]["outputs"][0]
+        second_ai, _ = self.store.issue("AI")
+        first = self.pending_read()["outputs"][0]
+        second = self.pending_read(ai=second_ai)["outputs"][0]
         self.assertTrue(self.acknowledge(first, code="WRONG000")["isError"])
         missing_code = self.rpc("tools/call", {"name": "acknowledge_output", "arguments": {
             "output_id": identifier, "receipt": first["receipt"]}})["result"]
@@ -135,23 +200,24 @@ class ChatBindingReviewFixTests(unittest.TestCase):
     def test_named_cursor_cannot_skip_general_unread_and_selector_conflicts_are_rejected(self):
         first, _ = self.shared_output("first")
         second, submission = self.shared_output("second", bound=True)
-        named = self.output_tool({"output_id": second})["structuredContent"]
+        named = self.output_tool({"output_id": first})["structuredContent"]
         self.assertTrue(self.output_tool({"cursor": named["cursor"]})["isError"])
-        self.assertEqual(self.output_tool()["structuredContent"]["outputs"][0]["output_id"], first)
+        self.assertEqual(self.output_tool()["structuredContent"]["outputs"][0]["output_id"], second)
         self.assertTrue(self.output_tool({"output_id": second, "submission_id": submission})["isError"])
 
     def test_forged_expired_and_old_generation_receipts_do_not_consume(self):
         identifier, _ = self.shared_output()
-        item = self.output_tool()["structuredContent"]["outputs"][0]
+        item = self.pending_read()["outputs"][0]
         forged = dict(item, receipt=uuid.uuid4().hex)
         self.assertTrue(self.acknowledge(forged)["isError"])
         self.store.execute("UPDATE cursors SET expires=? WHERE id=?", (self.now, item["receipt"]))
         self.assertTrue(self.acknowledge(item)["isError"])
-        item = self.output_tool()["structuredContent"]["outputs"][0]
+        item = self.pending_read()["outputs"][0]
         self.code = self.rotate()["code"]
         self.assertTrue(self.acknowledge(item)["isError"])
-        current = self.output_tool()["structuredContent"]["outputs"][0]
+        current = self.pending_read()["outputs"][0]
         self.assertFalse(self.acknowledge(current)["isError"])
+        self.assertEqual(self.store.execute("SELECT text FROM outputs WHERE id=?", (identifier,)).fetchone()[0], "")
 
     def test_notification_ack_does_not_consume_bound_or_unbound_text_and_late_event_is_skipped(self):
         subscription = self.subscribe(self.code)
@@ -166,14 +232,14 @@ class ChatBindingReviewFixTests(unittest.TestCase):
                                                (identifier,)).fetchone()[:], (1, None))
             item = self.output_tool()["structuredContent"]["outputs"][0]
             self.assertEqual(item["output_id"], identifier)
-            self.acknowledge(item)
+            self.assertTrue(self.harness.service.wait_idle())
             with mock.patch.object(self.harness.service, "webhook_call") as send:
                 self.harness.service.deliver(job)
                 send.assert_not_called()
 
     def test_ack_rechecks_external_revocation_and_storage_failure_keeps_output_pending(self):
         identifier, _ = self.shared_output()
-        item = self.output_tool()["structuredContent"]["outputs"][0]
+        item = self.pending_read()["outputs"][0]
         value = {"output_id": identifier, "receipt": item["receipt"]}
         principal = self.store.authenticate(self.ai, "AI")
         execute = self.store.execute
@@ -198,7 +264,7 @@ class ChatBindingReviewFixTests(unittest.TestCase):
 
     def test_read_ack_sql_rechecks_persisted_chat_binding_deadline(self):
         identifier, _ = self.shared_output()
-        item = self.output_tool()["structuredContent"]["outputs"][0]
+        item = self.pending_read()["outputs"][0]
         principal = self.store.authenticate(self.ai, "AI")
         external = sqlite3.connect(Path(self.temp.name) / "bridge.sqlite3", isolation_level=None)
         self.addCleanup(external.close)
@@ -213,6 +279,21 @@ class ChatBindingReviewFixTests(unittest.TestCase):
                 self.store.acknowledge_output(principal,
                     {"output_id": identifier, "receipt": item["receipt"]}, 1)
         self.assertIsNone(self.store.execute("SELECT consumed_at FROM outputs WHERE id=?", (identifier,)).fetchone()[0])
+
+    def test_upgrade_clears_confirmed_text_and_expiry_does_not_reopen_older_general_output(self):
+        older, _ = self.shared_output("unconfirmed legacy share")
+        latest, _ = self.shared_output("previously acknowledged legacy share")
+        self.store.execute("UPDATE outputs SET consumed_at=? WHERE id=?", (self.now, latest))
+        reopened = a.BridgeStore(self.temp.name, self.store.conversation, clock=lambda: self.now)
+        self.addCleanup(reopened.close)
+        principal = reopened.authenticate(self.ai, "AI")
+        self.assertEqual(reopened.execute("SELECT text FROM outputs WHERE id=?", (latest,)).fetchone()[0], "")
+        self.assertEqual(reopened.ai_output(principal, {"output_id": latest})["outputs"], [])
+        self.assertEqual(reopened.ai_output(principal, {})["outputs"], [])
+        reopened.execute("UPDATE outputs SET expires=? WHERE id=?", (self.now, latest))
+        reopened.cleanup()
+        self.assertEqual(reopened.ai_output(principal, {})["outputs"], [])
+        self.assertEqual(reopened.ai_output(principal, {"output_id": older})["outputs"][0]["output_id"], older)
 
     def test_upgrade_does_not_guess_reads_from_old_notification_ack_or_delete_output(self):
         identifier, _ = self.shared_output("legacy retained output")

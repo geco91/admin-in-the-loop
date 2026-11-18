@@ -44,13 +44,13 @@ from types import MappingProxyType
 # Kanonische Version (Journal 8.10.: jede ausgelieferte Codeaenderung erhoehrt
 # mindestens den Patch-Stand). BRIDGE_SERVER_INFO pflegt eine separate Kopie im
 # Bridge-Block; ein Konsistenztest pinnt beide auf denselben Wert.
-APP_VERSION = "0.9.29"
+APP_VERSION = "0.9.30"
 
 
 # Single canonical UI/CLI version. The embedded bridge block keeps its own copy in
 # BRIDGE_SERVER_INFO; a consistency test pins both to the same value (Journal #88ff:
 # every delivered program state bumps at least the patch digit).
-APP_VERSION = "0.9.29"
+APP_VERSION = "0.9.30"
 
 
 def _load_bridge_component(namespace=None):
@@ -10955,7 +10955,7 @@ BRIDGE_RETENTION = 24 * 3600
 BRIDGE_OUTPUT_LIMIT = 64 * 1024
 BRIDGE_BLOCK_SIZES = ("SINGLE", "SMALL", "MEDIUM", "LARGE")
 BRIDGE_VERSIONS = ("2026-07-28", "2025-11-25", "2025-06-18", "2025-03-26")
-BRIDGE_SERVER_INFO = {"name": "admin-in-the-loop", "version": "0.9.29"}
+BRIDGE_SERVER_INFO = {"name": "admin-in-the-loop", "version": "0.9.30"}
 BRIDGE_BASE32 = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 # M9 Folgeaenderung (Operator-Journal 100): pairing-code validity 10 minutes; the
 # attempt limit (5), claim-path cooldown and the separate PAIR_PENDING token lifetime
@@ -11120,6 +11120,7 @@ class BridgeStore:
         self.instance = uuid.uuid4().hex  # Restart changes the controller generation.
         self.on_new_output = None  # Optional service hook; the store stays usable without one.
         self.lock = threading.RLock()
+        self.outputs_in_flight = set()
         path = self.directory / "bridge.sqlite3"
         if path.exists() or path.is_symlink():
             private_read(path, 64 * 1024 * 1024)
@@ -11227,6 +11228,8 @@ class BridgeStore:
                   "chat_binding_state_invalid", 500)
         self.execute("DELETE FROM chat_binding_attempts WHERE conversation<>? OR generation<>?",
                      (conversation, self.chat_binding["generation"]))
+        # v0.9.29 kept the text even after a successful read acknowledgment.
+        self.execute("UPDATE outputs SET text='' WHERE consumed_at IS NOT NULL AND text<>''")
         self.preference = "SMALL"
         self.pair = None
         self.cleanup()
@@ -11715,7 +11718,7 @@ class BridgeStore:
             check(row is not None, "submission_unavailable", 404)
             shared = self.execute("SELECT id FROM outputs WHERE submission=? AND expires>? AND consumed_at IS NULL LIMIT 1",
                                   (submission_id, now)).fetchone()
-            # Permanent release fact: remains provable after an explicit read ACK.
+            # Retain the share fact until expiry, including after the text is cleared.
             ever = self.execute("SELECT id FROM outputs WHERE submission=? AND expires>? LIMIT 1",
                                 (submission_id, now)).fetchone()
             return {"state": {"WAITING": "ACCEPTED"}.get(row["state"], row["state"]),
@@ -11851,18 +11854,35 @@ class BridgeStore:
                                      "SUBMISSION:" + submission if submission is not None else "UNREAD")
             position, reset = self.output_cursor_position(cursor, principal["id"], kind)
             if submission is None and output_id is None:
-                row = self.execute("SELECT * FROM outputs WHERE seq>? AND expires>? AND consumed_at IS NULL"
-                                   " ORDER BY seq LIMIT 1", (position, self.clock())).fetchone()
+                # Only the latest share belongs in a general pull. The sequence
+                # stays at that share even after its row expires and is removed.
+                row = self.execute("SELECT * FROM outputs WHERE seq=(SELECT seq FROM sqlite_sequence WHERE name='outputs')"
+                                   " AND seq>? AND expires>? AND consumed_at IS NULL",
+                                   (position, self.clock())).fetchone()
             else:
-                # Explicit reads include acknowledged data, without reopening the unread queue.
                 column, selected = ("id", output_id) if output_id is not None else ("submission", submission)
                 row = self.execute("SELECT * FROM outputs WHERE seq>? AND expires>? AND " + column + "=?"
-                                   " ORDER BY seq LIMIT 1", (position, self.clock(), selected)).fetchone()
+                                   " AND consumed_at IS NULL ORDER BY seq LIMIT 1",
+                                   (position, self.clock(), selected)).fetchone()
+            if row is not None and row["id"] in self.outputs_in_flight:
+                row = None
             next_cursor = self.cursor(principal["id"], kind, row["seq"] if row else position)
             result = [] if row is None else [{"output_id": row["id"], "submission_id": row["submission"],
                                               "text": row["text"], "expires_at": row["expires"],
-                                              "receipt": next_cursor, "acknowledged": row["consumed_at"] is not None}]
+                                              "receipt": next_cursor, "acknowledged": False}]
             return {"outputs": result, "cursor": next_cursor, "cursor_reset": reset}
+
+    def finish_output_read(self, output_id, written):
+        with self.lock:
+            try:
+                if written:
+                    # Keep the row for idempotent controller retries and submission status.
+                    self.execute("UPDATE outputs SET consumed_at=?, text='' WHERE id=? AND consumed_at IS NULL",
+                                 (self.clock(), output_id))
+            except sqlite3.Error:
+                bridge_console("AI/MCP-Ausgabe: Abholung konnte nicht gespeichert werden (output_state_write_failed)")
+            finally:
+                self.outputs_in_flight.remove(output_id)
 
     def output_cursor_position(self, value, owner, kind):
         if not value:
@@ -11873,7 +11893,7 @@ class BridgeStore:
             raise BridgeError("invalid_cursor", data={"retry_without_cursor": True}) from None
         row = self.execute("SELECT * FROM cursors WHERE id=?", (value,)).fetchone()
         if row is None:
-            return 0, True  # Removed on restart/expiry: rescan UNREAD, never consumed history.
+            return 0, True  # Restart this selector after a bridge restart or cursor expiry.
         if row["owner"] != owner:
             raise BridgeError("invalid_cursor", data={"retry_without_cursor": True})
         if row["kind"] == "OUTPUT":
@@ -11901,7 +11921,7 @@ class BridgeStore:
                 check(read is not None and read["expires"] > now, "output_receipt_expired", 409)
             # Recheck both principal and current human chat binding in the write,
             # including revocation/rotation by another SQLite connection at ACK time.
-            changed = self.execute("UPDATE outputs SET consumed_at=coalesce(consumed_at,?) WHERE id=? AND expires>?"
+            changed = self.execute("UPDATE outputs SET consumed_at=coalesce(consumed_at,?), text='' WHERE id=? AND expires>?"
                 " AND EXISTS(SELECT 1 FROM tokens WHERE id=? AND role='AI' AND conversation=? AND state='PAIRED')"
                 " AND EXISTS(SELECT 1 FROM meta WHERE key='chat_binding' AND json_extract(value,'$.generation')=?"
                 " AND json_extract(value,'$.expires_at')>?)",
@@ -11983,7 +12003,7 @@ class BridgeStore:
             return dict(row) if row else None
 
     def mark_delivered(self, output_id, subscription_id, expected_generation):
-        """Record notification delivery only; the text still needs a read receipt ACK."""
+        """Record delivery of the availability notification."""
         opaque(output_id)
         with self.lock:
             if not self._binding_is_live(expected_generation):
@@ -12020,15 +12040,15 @@ BRIDGE_TOOLS = [
     {"name": "submit_proposal", "description": "Queue a terminal command for local human review. ACCEPTED means received, never executed. No terminal access.",
      "inputSchema": object_schema({"request_id": BRIDGE_ID_SCHEMA, "text": {"type": "string", "maxLength": 4096}}, ("request_id", "text")),
      "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False}},
-    {"name": "get_submission_status", "description": "Return transport acceptance and whether a not-yet-acknowledged human-approved output exists. Event delivery alone does not acknowledge reading. No execution, prompt or review status.",
+    {"name": "get_submission_status", "description": "Return transport acceptance and whether a human-approved output remains to be fetched. Event delivery only signals availability. No execution, prompt or review status.",
      "inputSchema": object_schema({"submission_id": BRIDGE_ID_SCHEMA}, ("submission_id",)),
      "annotations": {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False}},
-    {"name": "get_approved_output", "description": "Read human-approved output. General reads return unacknowledged output; output_id or submission_id permits retained readback. After receiving/processing text call acknowledge_output with output_id and receipt. Reads alone do not consume. If cursor_reset is true the scan restarted over unacknowledged output only. Empty never proves execution.",
+    {"name": "get_approved_output", "description": "Fetch human-approved output once. A general read offers only the latest share; output_id or submission_id selects a pending share explicitly. The bridge clears the text after writing the response. If cursor_reset is true the read restarted at the latest or explicitly selected share. Empty never proves execution.",
      "inputSchema": object_schema({"submission_id": BRIDGE_ID_SCHEMA, "output_id": BRIDGE_ID_SCHEMA, "cursor": BRIDGE_ID_SCHEMA}),
-     "annotations": {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False}},
-    {"name": "acknowledge_output", "description": "Confirm text successfully received/processed using its output_id and receipt from get_approved_output. Idempotently remove it from the shared conversation's unread queue, retaining named readback until expiry. Do not acknowledge a lost response or an availability notification.",
+     "annotations": {"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": False}},
+    {"name": "acknowledge_output", "description": "Compatibility tool for clients that explicitly confirm fetched text using its output_id and receipt. The bridge normally clears text as part of the fetch. Event notifications carry no read receipt.",
      "inputSchema": object_schema({"output_id": BRIDGE_ID_SCHEMA, "receipt": BRIDGE_ID_SCHEMA}, ("output_id", "receipt")),
-     "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False}},
+     "annotations": {"readOnlyHint": False, "destructiveHint": True, "idempotentHint": True, "openWorldHint": False}},
     {"name": "get_preferences", "description": "Read the human's preferred command block size: SINGLE, SMALL, MEDIUM or LARGE. A comfort preference, never permission.",
      "inputSchema": object_schema({}),
      "annotations": {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False}},
@@ -12098,10 +12118,11 @@ def standard_webhook_headers(identifier, webhook_id, secret, body):
             "webhook-signature": signature}
 
 class BridgeResponse:
-    __slots__ = ("status", "value")
+    __slots__ = ("status", "value", "after_write")
 
     def __init__(self, status=200, value=None):
         self.status, self.value = status, value
+        self.after_write = None
 
 
 class WebhookFailure(Exception):
@@ -12292,23 +12313,25 @@ class BridgeRequestHandler(http.server.BaseHTTPRequestHandler):
         try:
             self.connection.settimeout(5)
             request = BridgeRequest(self, kind)
+            check(not request.headers.get_all("Origin"), "browser_origin_forbidden", 403)
+            check(request.host in service.hosts(kind), "invalid_host", 403)
+            check(len(request.path_qs) <= 2048, "url_limit", 414)
+            for key in ("Authorization", "X-AITL-AI-Key", "Content-Type", "MCP-Protocol-Version", "Host",
+                        "Content-Length", "Transfer-Encoding"):
+                check(len(request.headers.get_all(key, [])) <= 1, "duplicate_header")
+            service.throttle("GLOBAL", 600)
+            service.enter()
             try:
-                check(not request.headers.get_all("Origin"), "browser_origin_forbidden", 403)
-                check(request.host in service.hosts(kind), "invalid_host", 403)
-                check(len(request.path_qs) <= 2048, "url_limit", 414)
-                for key in ("Authorization", "X-AITL-AI-Key", "Content-Type", "MCP-Protocol-Version", "Host",
-                            "Content-Length", "Transfer-Encoding"):
-                    check(len(request.headers.get_all(key, [])) <= 1, "duplicate_header")
-                service.throttle("GLOBAL", 600)
-                service.enter()
+                response = service.route(request)
+                written = False
                 try:
-                    response = service.route(request)
+                    self.connection.settimeout(35)
+                    written = self._respond(response.status, response.value)
                 finally:
-                    service.leave()
-            except BridgeError as failure:
-                response = service.json({"error": failure.code}, failure.status)
-            self.connection.settimeout(35)
-            self._respond(response.status, response.value)
+                    if response.after_write is not None:
+                        response.after_write(written)
+            finally:
+                service.leave()
         except BridgeError as failure:
             self._respond(failure.status, {"error": failure.code})
         except Exception:
@@ -12328,7 +12351,8 @@ class BridgeRequestHandler(http.server.BaseHTTPRequestHandler):
             if body:
                 self.wfile.write(body)
         except OSError:
-            pass
+            return False
+        return True
 
 
 class BoundedReader:
@@ -13267,7 +13291,7 @@ class BridgeService:
                         opaque(args["submission_id"])
                         data = self.store.submission_status(args["submission_id"])
                     elif name == "get_approved_output":
-                        data = self.store.ai_output(principal, args)
+                        return self.mcp_output_response(principal, args, rid, modern)
                     elif name == "acknowledge_output":
                         data = self.store.acknowledge_output(principal, args, binding_generation)
                     elif name == "get_preferences":
@@ -13279,21 +13303,8 @@ class BridgeService:
                         data = self.store.withdraw(args["submission_id"])
                     else:
                         raise BridgeError("unknown_tool")
-                # Every MCP client can read content; some hosts discard structuredContent.
-                # Put approved text into its own plaintext block once, not into a nested
-                # JSON string or twice into the response. Metadata names its block index.
-                if name == "get_approved_output":
-                    metadata = {"outputs": [], "cursor": data["cursor"], "cursor_reset": data["cursor_reset"]}
-                    blocks = [{"type": "text", "text": ""}]
-                    for item in data["outputs"]:
-                        metadata["outputs"].append({key: val for key, val in item.items() if key != "text"}
-                                                    | {"text_content_index": len(blocks)})
-                        blocks.append({"type": "text", "text": item["text"]})
-                    blocks[0]["text"] = encoded(metadata).decode()
-                    result = {"content": blocks, "structuredContent": metadata, "isError": False}
-                else:
-                    result = {"content": [{"type": "text", "text": encoded(data).decode()}],
-                              "structuredContent": data, "isError": False}
+                result = {"content": [{"type": "text", "text": encoded(data).decode()}],
+                          "structuredContent": data, "isError": False}
             elif method == "events/list" and modern:
                 exact(params, set())
                 result = {"events": [BRIDGE_EVENT_DEFINITION]}
@@ -13323,6 +13334,30 @@ class BridgeService:
         if method in self.MCP_LOG_METHODS:
             outcome = " (Tool-Fehler)" if method == "tools/call" and result.get("isError") else ""
             bridge_console("AI/MCP-Eingang -> Bridge: %s beantwortet%s" % (method, outcome))
+        return self.mcp_response(rid, result, modern)
+
+    def mcp_output_response(self, principal, args, rid, modern):
+        # The caller holds the store lock through both selection and reservation.
+        data = self.store.ai_output(principal, args)
+        metadata = {**data, "outputs": []}
+        blocks = [{"type": "text", "text": ""}]
+        if data["outputs"]:
+            item, = data["outputs"]
+            # Some clients discard structuredContent. Send the plaintext once
+            # in its own block and describe how to find it in the metadata.
+            metadata["outputs"].append({key: val for key, val in item.items() if key != "text"}
+                                        | {"text_content_index": 1})
+            blocks.append({"type": "text", "text": item["text"]})
+        blocks[0]["text"] = encoded(metadata).decode()
+        response = self.mcp_response(rid, {"content": blocks, "structuredContent": metadata, "isError": False}, modern)
+        bridge_console("AI/MCP-Eingang -> Bridge: tools/call beantwortet")
+        if data["outputs"]:
+            output_id = item["output_id"]
+            response.after_write = lambda written: self.store.finish_output_read(output_id, written)
+            self.store.outputs_in_flight.add(output_id)
+        return response
+
+    def mcp_response(self, rid, result, modern):
         if modern:
             result["resultType"] = "complete"
             result["_meta"] = {"io.modelcontextprotocol/serverInfo": BRIDGE_SERVER_INFO}

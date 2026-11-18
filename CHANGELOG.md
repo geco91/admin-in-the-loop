@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.9.30 — Zuletzt geteilte Ausgabe einmalig abholen
+
+- Der allgemeine Abruf bietet ausschließlich die jüngste Freigabe an, solange sie
+  aussteht. Ältere offene Freigaben sind bis zum Ablauf gezielt per Ausgabe- oder
+  Vorschlags-ID abrufbar.
+- Nach dem Schreiben der MCP-Antwort entfernt die Bridge den Text aus der Datenbank.
+  Der normale Abruf funktioniert damit auch in Connectors ohne separates ACK-Tool.
+  Metadaten für den Vorschlagsstatus und idempotente Upload-Wiederholungen verfallen
+  wie zuvor. Beim Update werden bereits bestätigte Texte bereinigt.
+- Ein erkannter Schreibfehler lässt die Freigabe abrufbar. Gleichzeitige Abrufe
+  reservieren dieselbe Ausgabe für höchstens eine laufende Antwort. Event-ACKs
+  bestätigen weiterhin ausschließlich die Benachrichtigung.
+- UI und Bridge melden 0.9.30.
+
 ## 0.9.29 — Freigegebenen Output ausdrücklich als gelesen bestätigen
 
 - `get_approved_output` liefert Text plus Empfangsbeleg; `acknowledge_output`
