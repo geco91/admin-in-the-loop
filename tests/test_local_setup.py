@@ -234,7 +234,8 @@ class InstallationTests(unittest.TestCase):
     def test_cancelled_background_bootstrap_cannot_handoff_owned_process_late(self):
         entered, release = threading.Event(), threading.Event()
         process = mock.Mock()
-        def bootstrap():
+        def bootstrap(directory):
+            self.assertEqual(directory, "/unused")
             entered.set()
             release.wait(3)
             return process
@@ -463,7 +464,7 @@ class AppVersionConsistencyTests(unittest.TestCase):
     muessen identisch sein; --version existiert im Haupt-Parser."""
 
     def test_version_sources_pinned(self):
-        self.assertEqual(a.APP_VERSION, "0.9.30")
+        self.assertEqual(a.APP_VERSION, "0.9.31")
         self.assertEqual(a.BRIDGE_SERVER_INFO["name"], "admin-in-the-loop")
         self.assertEqual(a.BRIDGE_SERVER_INFO["version"], a.APP_VERSION)
 

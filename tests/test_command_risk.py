@@ -24,6 +24,22 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import admin_in_the_loop as a
 
 
+class FixtureRiskTool(a.BridgeRiskTool):
+    """Use private fixture binaries to exercise the subprocess adapter in isolation."""
+    def analyze(self, job, cancel):
+        local = replace(job, key=replace(job.key, tool=self.endpoint.tool), directory=self.endpoint.directory)
+        return replace(a.run_command_risk(local, cancel), key=job.key)
+
+
+def select_fixture_tool(core, tool=None, directory=None):
+    adapter = None
+    if tool is not None:
+        endpoint = mock.Mock(tool=tool, directory=str(directory))
+        adapter = FixtureRiskTool(endpoint, tool.generation, tool.binary, tool.version, tool.sha256)
+    core._command_risk.configure(adapter)
+    return core.command_risk_snapshot()
+
+
 def analysis(command="printf x\n", score=0):
     level = "safe" if score <= 20 else "caution" if score <= 50 else "danger" if score <= 80 else "critical"
     return {"command": command, "score": score, "level": level,
@@ -207,7 +223,7 @@ sys.exit(("safe", "caution", "danger", "critical").index(value["level"]))
         return a.CommandRiskTool(str(binary), hashlib.sha256(raw).hexdigest(), len(raw), "0.1.10", 1)
 
     def enable(self, tool):
-        return self.core.set_command_risk(tool, str(self.work))
+        return select_fixture_tool(self.core, tool, self.work)
 
     def until(self, predicate, timeout=4):
         deadline = time.monotonic() + timeout
@@ -369,7 +385,8 @@ sys.exit(("safe", "caution", "danger", "critical").index(value["level"]))
         self.core.review_command("printf x")
         original = subprocess.Popen
         for mode, reason in (("hang", "risk_timeout"), ("flood", "risk_output_limit")):
-            with self.subTest(mode=mode), mock.patch.object(a, "RISK_TIMEOUT", 0.2), \
+            timeout = 0.2 if mode == "hang" else a.RISK_TIMEOUT
+            with self.subTest(mode=mode), mock.patch.object(a, "RISK_TIMEOUT", timeout), \
                     mock.patch.object(a.subprocess, "Popen", wraps=subprocess.Popen) as launch:
                 processes = []
                 def tracked(*args, **kwargs):
@@ -391,7 +408,7 @@ sys.exit(("safe", "caution", "danger", "critical").index(value["level"]))
         self.record.unlink()
         self.enable(self.fake("hang"))
         self.until(lambda _: self.record.exists())
-        self.core.set_command_risk()
+        select_fixture_tool(self.core)
         self.assertEqual(self.core.command_risk_snapshot().state, "DISABLED")
         self.assertTrue(self.core._command_risk.close())
         evidence = json.loads(self.record.read_text())
@@ -474,7 +491,7 @@ sys.exit(("safe", "caution", "danger", "critical").index(value["level"]))
             # Deliberately late completion despite cancellation: tests the owner boundary.
             return a.CommandRiskResult(job.key, "RESULT", data={"score": 100})
 
-        with mock.patch.object(a, "run_command_risk", side_effect=delayed):
+        with mock.patch.object(FixtureRiskTool, "analyze", side_effect=delayed):
             self.core.review_command("printf same")
             self.enable(self.fake())
             first, release_a = jobs.get(timeout=2)
@@ -495,7 +512,7 @@ sys.exit(("safe", "caution", "danger", "critical").index(value["level"]))
             self.core.review_command("printf newer")
             self.core.command_risk_snapshot()
             old_epoch_job, release_d = jobs.get(timeout=2)
-            self.core.set_command_risk()
+            select_fixture_tool(self.core)
             self.assertIsNone(self.core.command_risk_snapshot().result)
             self.enable(self.fake())
             self.assertNotEqual(self.core._command_risk.current.epoch, old_epoch_job.key.epoch)

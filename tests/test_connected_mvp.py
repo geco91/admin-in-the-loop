@@ -33,6 +33,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import admin_in_the_loop as a
+from test_command_risk import select_fixture_tool
 
 
 def request(url, method="GET", path=None, body=None, headers=None):
@@ -2605,7 +2606,7 @@ class BridgeTunnelTests(unittest.TestCase):
             log = buffer.getvalue()
             self.assertEqual((status["phase"], status["detail"]), ("error", "tunnel_download_failed"))
             self.assertIn("Tunnel-Vorbereitung: offizielles Release von GitHub laden", log)
-            self.assertIn("Tunnel-Status: error (tunnel_download_failed)", log)
+            self.assertIn("Bridge -> Tunnel-Client: Status error (tunnel_download_failed)", log)
             self.assertNotIn("K" * 32, log)
 
     def test_finds_state_dir_client_kit(self):
@@ -4149,7 +4150,7 @@ class RiskSentPreservationTests(unittest.TestCase):
 
     def test_result_preserved_across_sent_states_without_reanalysis(self):
         self.core.review_command("printf x")
-        self.core.set_command_risk(self.fake_tool(), str(self.work))
+        select_fixture_tool(self.core, self.fake_tool(), self.work)
         first = self.until(lambda value: value.state == "RESULT").result
         reviewer = self.core._command_risk
         for state in ("CHECKING", "TRANSFERRED", "TRANSFER_UNCERTAIN", "TRANSFERRED"):
@@ -4179,7 +4180,7 @@ class RiskSentPreservationTests(unittest.TestCase):
 
     def test_inflight_scan_without_result_is_cancelled_at_send(self):
         self.core.review_command("hang-command")
-        self.core.set_command_risk(self.fake_tool(), str(self.work))
+        select_fixture_tool(self.core, self.fake_tool(), self.work)
         self.until(lambda value: value.state == "SCANNING")
         self.core.review_state = "CHECKING"
         snapshot = self.core.command_risk_snapshot()
@@ -4196,7 +4197,7 @@ class RiskSentPreservationTests(unittest.TestCase):
         # preserved at sent states; UNAVAILABLE keeps the pre-M3 discard
         # (frozen evidence semantics, test_command_risk.py parity).
         self.core.review_command("printf x")
-        self.core.set_command_risk(self.fake_tool(bad=True), str(self.work))
+        select_fixture_tool(self.core, self.fake_tool(bad=True), self.work)
         snapshot = self.until(lambda value: value.state == "UNAVAILABLE")
         self.assertEqual(snapshot.result.state, "UNAVAILABLE")
         self.core.review_state = "CHECKING"
@@ -4206,7 +4207,7 @@ class RiskSentPreservationTests(unittest.TestCase):
 
     def test_direction_and_session_changes_invalidate_at_sent(self):
         self.core.review_command("printf x")
-        self.core.set_command_risk(self.fake_tool(), str(self.work))
+        select_fixture_tool(self.core, self.fake_tool(), self.work)
         first = self.until(lambda value: value.state == "RESULT").result
         self.core.review_state = "TRANSFERRED"
         self.assertIs(self.core.command_risk_snapshot().result, first)

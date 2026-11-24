@@ -16,6 +16,16 @@ weitergegeben. Das Terminal bleibt unabhängig manuell bedienbar.
 
 ## Aktuelle persönliche Testversion
 
+Der Arbeitsstand **0.9.31** verwaltet sh-guard am Standort der Bridge. Unter
+**Befehlsprüfung → sh-guard → Einstellungen** steht das Installationsziel. Die
+gleiche Verwaltung öffnet sich im Ziel-Qube mit
+`python3 admin_in_the_loop.py --bridge --gui`. Das Hauptprogramm verwendet
+die bestehende Bridge-Verbindung auch für die Analyse. Der erste Reiter
+**Allgemein** zeigt die Verbindung und auf der Bridge die Kopplung zum Hauptprogramm.
+Unter **Dienste** verwaltest du sh-guard. Zum Testen dieses Branches auf
+Hauptprogramm und Bridge jeweils `python3 admin_in_the_loop.py update geco91 feat/bridge-sh-guard`
+ausführen und die jeweilige Anwendung neu starten. [Einrichtung und Datenfluss](doc/SH_GUARD.md)
+
 **v0.9.30 ist die aktuelle persönliche Testversion auf `geco91/main`.**
 Der allgemeine MCP-Abruf liefert nur die zuletzt geteilte Ausgabe, solange sie
 zur Abholung bereitsteht. Nach dem Versand der Antwort entfernt die Bridge den
@@ -193,9 +203,9 @@ historische Stände. Die Runtime-Versionsquelle ist `APP_VERSION` in
 Hosted ChatGPT-Work, offizielles Tunnelbinary und native Desktop-Abnahmen bleiben
 offene separate Schritte; der aktuelle Verbindungs-Prüfnachweis steht in
 [CONNECTION_UX.md](doc/CONNECTION_UX.md). Die Mac-Vorschau ist
-nicht integriert. Der optionale sh-guard-Reviewer bleibt beim Erststart aus;
-die bewusste Aktivierung wird gespeichert. Installation und lokale Analyse sind
-mit gepinnten v0.1.10-Binaries integriert; siehe [sh-guard-Anleitung und Prüfnachweise](doc/SH_GUARD.md).
+nicht integriert. Der optionale sh-guard-Reviewer ist beim Erststart ausgeschaltet.
+Die Aktivierung gilt für den gewählten Bridge-Standort. Dort installiert die
+Bridge das gepinnte v0.1.10-Binary und analysiert Befehle. [sh-guard-Anleitung und Prüfnachweise](doc/SH_GUARD.md)
 
 Der [Testbericht vom 30. September 2026](tests/MVP_0.8_TEST_REPORT.md) dokumentiert
 damalige Linux-/Ubuntu-Prüfungen. Er belegt keine aktuelle native macOS- oder

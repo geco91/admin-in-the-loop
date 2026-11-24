@@ -1,4 +1,70 @@
-# Lokale Commandanalyse mit sh-guard
+# sh-guard auf der Bridge
+
+Ab **0.9.31** führt die Bridge die Befehlsanalyse aus. Aktualisiere für diese
+Funktion Hauptprogramm und Bridge. Bei einer älteren Bridge meldet die
+Dienstverwaltung `risk_bridge_update_required`.
+
+1. Öffne **Befehlsprüfung → sh-guard → Einstellungen**. Prüfe den Standort im
+   Titel und auf dem Installationsbutton. Über **Bridge-Verwaltung öffnen →
+   Allgemein → Verbindung einstellen** wählst
+   du bei Bedarf einen anderen Standort. Eine vorhandene Remote-Kopplung
+   liefert den Zugang. Für rein lokalen Betrieb startet AITL bei Bedarf einen
+   privaten Bridge-Prozess. Ein OpenAI-Tunnel wird dafür nicht benötigt.
+2. **Installieren** lädt das für den Bridge-Rechner gepinnte Archiv dort
+   herunter. Unter **Technische Details anzeigen** stehen Installationspfad,
+   Downloadquelle und Archivprüfsumme. Die Bridge prüft die SHA-256-Werte von
+   Archiv und Binary und führt den Funktionstest aus. Die separate Bridge
+   speichert das Tool unter ihrem privaten Zustandsverzeichnis. Auf dem
+   gleichen Rechner nutzt der lokale Prozess den bisherigen privaten Toolordner
+   auch nach einem Neustart.
+3. Aktiviere **sh-guard** in der Befehlsprüfung, um die finale Fassung
+   einschließlich lokaler Änderungen auf diesem Standort analysieren zu lassen.
+   Der persönliche Qube sendet diesen Text vor der Terminalfreigabe zur
+   gekoppelten Bridge. Der Befund gehört zur Textrevision, zum exakten Inhalt
+   und zur Dienstinstanz. Über die Übergabe ans Terminal entscheidet der Admin.
+4. **Bridge-Verwaltung öffnen** zeigt die Verwaltung als Unterfenster.
+   Im grafischen Ziel-Qube öffnet `python3 admin_in_the_loop.py --bridge --gui`
+   die Verwaltung direkt. Beide Fenster starten im Reiter **Allgemein**.
+   Er zeigt den Standort und auf der Bridge den Kopplungsstatus, im Hauptprogramm
+   den Verbindungsstatus. Auf der Bridge erzeugt **Hauptprogramm koppeln**
+   einen Einmalcode und zeigt den Zertifikatsfingerabdruck an. Gib den Code
+   beim Koppeln im Hauptprogramm ein. Eine bestehende Kopplung gilt für alle
+   Dienste dieser Bridge. Der Reiter **Dienste** enthält die sh-guard-Verwaltung.
+   Das Zahnrad in der Befehlsprüfung öffnet die sh-guard-Einstellungen direkt.
+   Verwende bei einem abweichenden Zustandsverzeichnis
+   denselben Wert für `--state-dir` wie beim Dienststart. Bei einer laufenden
+   Bridge fordert der Befehl das Fenster in deren grafischer Sitzung an.
+   Schließen lässt den Dienst weiterlaufen. Ein Dienst ohne grafische Sitzung
+   lässt sich über die gekoppelte Hauptanwendung verwalten.
+
+Der Controller liest Status über `GET /v1/services/sh-guard` und verwendet die
+zugehörigen POST-Endpunkte `/setup` und `/analyze`. Setup-Aktionen sind auf
+Installieren, Prüfen, Abbrechen und Entfernen begrenzt. Die vorhandene
+Qrexec-Weiterleitung oder HTTPS-Kopplung trägt alle Aufrufe. Der MCP-Zugang des
+Chats ist von diesen Endpunkten getrennt. Analysetexte und Befunde werden im
+Arbeitsspeicher verarbeitet. Bei Ausfall einer gewählten Remote-Bridge zeigt
+der Controller die fehlende Prüfung an.
+
+### Vorschau auf der Bridge
+
+| Allgemein nach der Kopplung | Dienste mit installiertem sh-guard |
+| --- | --- |
+| ![Standort und Kopplungsstatus](assets/bridge-services/allgemein.png) | ![sh-guard ist auf der Bridge bereit](assets/bridge-services/dienste.png) |
+
+## Bridge-Integration prüfen
+
+Die Vertragstests prüfen die Dienstaufrufe, die Bindung an den gewählten Qube
+und die Meldung bei Verbindung zu einer älteren Bridge. Mit dem offiziellen
+Plattformarchiv testet die Suite zusätzlich zwei getrennte Prozesse, die
+HTTPS-Kopplung und die Analyse eines editierten Befehls. Unter Xvfb prüft sie
+auch den erneuten Aufruf der Dienstverwaltung.
+
+```bash
+AITL_TEST_SH_GUARD_ARCHIVE=/absoluter/pfad/sh-guard-x86_64-unknown-linux-gnu.tar.gz \
+  xvfb-run -a python3 -m unittest discover -s tests -p 'test_bridge_shguard.py' -v
+```
+
+## Frühere lokale Einrichtung und Prüfnachweise bis 0.9.30
 
 Entwicklungsstand AITL 0.9.14. Der Reviewer unterstützt die menschliche Prüfung
 von **AI→Terminal**. Rechts im AI-Bereich unter „Befehlsprüfung“ die Prüfung „sh-guard“ aktivieren
@@ -40,7 +106,7 @@ Die bestehende Normalisierung bleibt unabhängig von der Auswahl aktiv.
 Bei einem fehlgeschlagenen Speichervorgang wird die laufende Prüfung trotzdem
 deaktiviert; die gemeldete Einstellungsspeicherung muss vor dem Neustart korrigiert werden.
 
-## Dienste einrichten und erneut initialisieren
+### Dienste einrichten und erneut initialisieren
 
 Neben jedem verfügbaren Review-Eintrag führt ein Zahnrad mit Textbeschriftung
 zu seinen Einstellungen. Dies aktiviert den Dienst nicht automatisch. Während
@@ -62,7 +128,7 @@ nehmen dem Code nicht den Fokus. sh-guard braucht keine dauerhafte Verbindung;
 „Zeichen & Bytes“ braucht weder Download noch Verbindungsdaten. Es existiert
 weiterhin kein externer Ausgabe-/Datenschutzdienst mit Zugangseinstellungen.
 
-## Befund und Freigabe
+### Befund und Freigabe
 
 Die Hauptansicht verwendet die Stufen „Unauffällig“, „Vorsicht“, „Hohes Risiko“
 und „Kritisch“ zusammen mit dem Score und einer kurzen Erklärung. „Unauffällig“
@@ -100,7 +166,7 @@ Analysebefunde, keine AITL-Freigaben. Auch bei hohem Risiko entscheidet der Mens
 Terminal→AI erhält hierdurch keine personenbezogene-Daten-/Secret-Erkennung oder
 Schwärzung. Terminalsteuerzeichenbereinigung und Inhaltsprüfung sind verschiedene Funktionen.
 
-## Installation und Herkunft
+### Installation und Herkunft
 
 Tool: [sh-guard v0.1.10](https://github.com/aryanbhosale/sh-guard/releases/tag/v0.1.10),
 Quellstand `92005d65b1232946924b524bcad267a29d8a2cb5`,
@@ -131,7 +197,7 @@ werden nicht verwendet. Die Analyseumgebung enthält keine übernommenen
 Credential-/Proxyvariablen. Commandtext ist kurzzeitig in lokalen Prozessargumenten
 sichtbar; dies ist keine Sandbox gegen Prozesse derselben Benutzerkennung.
 
-## Prüfung
+### Prüfung
 
 Die echte Linux-x86_64-Installation wurde über den konfigurierten HTTPS-Proxy
 heruntergeladen, geprüft und ausgeführt. Native Tests decken Installation,

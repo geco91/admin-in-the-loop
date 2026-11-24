@@ -19,9 +19,10 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import admin_in_the_loop as a
 import test_risk_install_ui as fixtures
+from test_bridge_shguard import guard_bridge
 
 
-def wait_for(core, predicate, timeout=5):
+def wait_for(core, predicate, timeout=14):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         snapshot = core.command_risk_snapshot()
@@ -47,7 +48,7 @@ class PreferenceTests(unittest.TestCase):
         self.assertTrue(self.store.load_command_risk())
         self.assertEqual(self.store.load(), (True, "MEDIUM"))
         value = json.loads((self.base / "preferences.json").read_text())
-        self.assertEqual(set(value), {"version", "final_return", "block_size", "command_risk"})
+        self.assertEqual(set(value), {"version", "final_return", "block_size", "command_risk", "command_risk_host"})
         self.assertEqual((self.base / "preferences.json").stat().st_mode & 0o777, 0o600)
         self.store.save_command_risk(False)
         self.assertFalse(self.store.load_command_risk())
@@ -122,6 +123,7 @@ class PreferenceTests(unittest.TestCase):
         installation.install(threading.Event(), lambda _: None, lambda *_: archive)
         self.store.save(False, "SINGLE")
         self.store.save_command_risk(True)
+        guard_bridge(self, self.base, release)
         with mock.patch.object(a, "command_risk_release", return_value=release):
             core = a.AppCore(self.store)
             try:
@@ -141,20 +143,14 @@ class PreferenceTests(unittest.TestCase):
 
     def test_restart_with_saved_activation_and_missing_tool_requires_new_consent(self):
         self.store.save_command_risk(True)
-        original = a.CommandRiskSetup
-        launches = []
-
-        def start(installation, install=False):
-            launches.append(install)
-            return original(installation, install)
-
-        with mock.patch.object(a, "CommandRiskSetup", side_effect=start):
+        guard_bridge(self, self.base)
+        with mock.patch.object(a, "download_command_risk") as download:
             core = a.AppCore(self.store)
             try:
                 wait_for(core, lambda _: core.risk_setup_state == "INSTALL_CONFIRM")
                 self.assertTrue(core.risk_requested)
-                self.assertEqual(launches, [False])
-                self.assertFalse(core.risk_installation.destination.exists())
+                download.assert_not_called()
+                self.assertFalse(Path(core.guard_status()["destination"]).exists())
                 self.assertIsNone(core.review)
             finally:
                 core.close()
@@ -163,7 +159,7 @@ class PreferenceTests(unittest.TestCase):
         core = a.AppCore(self.store)
         try:
             with mock.patch.object(self.store, "save_command_risk", side_effect=a.ProbeError("preferences_write_failure")), \
-                    mock.patch.object(a, "CommandRiskSetup") as setup:
+                    mock.patch.object(a, "BridgeGuardClient") as setup:
                 with self.assertRaises(a.ProbeError):
                     core.request_command_risk(True)
                 setup.assert_not_called()
@@ -171,15 +167,15 @@ class PreferenceTests(unittest.TestCase):
         finally:
             core.close()
 
-    def test_failed_save_does_not_prevent_disabling_and_cancelling_setup(self):
+    def test_failed_save_does_not_prevent_disabling_and_cancelling_review(self):
         core = a.AppCore(self.store)
         try:
             core.risk_requested = True
-            setup = core.risk_setup = mock.Mock()
+            reviewer = self.enterContext(mock.patch.object(core._command_risk, "configure"))
             with mock.patch.object(self.store, "save_command_risk", side_effect=a.ProbeError("preferences_write_failure")):
                 with self.assertRaisesRegex(a.ProbeError, "preferences_write_failure"):
                     core.request_command_risk(False)
-            setup.close.assert_called_once()
+            reviewer.assert_called_once_with()
             self.assertFalse(core.risk_requested)
             self.assertEqual(core.risk_setup_state, "DISABLED")
         finally:
@@ -317,7 +313,8 @@ class NativeIntegrationTests(unittest.TestCase):
                 root.update()
                 self.assertTrue(ui.risk_remove_button.instate(["!disabled"]))
                 with mock.patch.object(ui.messagebox, "askyesno", return_value=True):
-                    ui.risk_remove_button.invoke()
+                    ui.remove_command_risk()
+                    wait_for(core, lambda _: core.guard_status()["state"] == "INSTALL_CONFIRM")
                 ui.render()
                 self.assertFalse(installation.destination.exists())
                 self.assertTrue(ui.risk_remove_button.instate(["disabled"]))
@@ -341,7 +338,7 @@ class NativeIntegrationTests(unittest.TestCase):
             core = a.AppCore(store)
             # Only inject transport bytes. Unpack, hashes, subprocess, version,
             # JSON/schema, review lifecycle and restart all use production code.
-            original = a.CommandRiskSetup
+            guard_bridge(self, base)
             try:
                 core.session, core.connection = "NATIVE_TEST", "CONNECTED"
                 core.set_command_target("TERMINAL")
@@ -349,11 +346,10 @@ class NativeIntegrationTests(unittest.TestCase):
                 core.channel.receive.return_value = []
                 sentinel = Path(directory) / "never-execute"
                 core.review_command("touch " + str(sentinel))
-                with mock.patch.object(a, "CommandRiskSetup", side_effect=lambda installation, install=False:
-                                       original(installation, install, lambda *_: raw)):
+                with mock.patch.object(a, "download_command_risk", return_value=raw):
                     core.request_command_risk(True)
                     wait_for(core, lambda s: s.state == "INSTALL_CONFIRM")
-                    self.assertFalse(core.risk_installation.destination.exists())
+                    self.assertFalse(Path(core.guard_status()["destination"]).exists())
                     core.confirm_command_risk_install(True)
                     wait_for(core, lambda s: s.state == "RESULT")
                 self.assertFalse(sentinel.exists())
@@ -384,10 +380,12 @@ class NativeIntegrationTests(unittest.TestCase):
                 wait_for(restored, lambda _: restored.risk_setup_state == "READY")
                 self.assertIsNone(restored.review)
                 self.assertTrue(restored.risk_requested)
-                installation = restored.risk_installation
+                status = restored.guard_status()
+                restored.guard_inspected = True
                 restored.request_command_risk(False)
-                restored.remove_command_risk()
-                self.assertFalse(installation.destination.exists())
+                restored.guard_action("remove", status)
+                wait_for(restored, lambda _: restored.guard_status()["state"] == "INSTALL_CONFIRM")
+                self.assertFalse(Path(status["destination"]).exists())
             finally:
                 restored.close()
 

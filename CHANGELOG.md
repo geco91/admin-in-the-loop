@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.9.31 — sh-guard auf der Bridge
+
+- Eine lokale oder gekoppelte Bridge lädt, prüft und installiert sh-guard und
+  analysiert den ausgewählten Befehlsstand über ihre authentifizierte Controller-API.
+- Die Dienstverwaltung zeigt den Standort im Einstellungsreiter, als Unterfenster
+  und auf dem Bridge-Rechner mit `--bridge --gui`. Eine lokale Aktivierung aus
+  früheren Versionen gilt für die lokale Bridge. Eine Remote-Analyse wird für
+  ihren konkreten Empfänger aktiviert.
+- Im Verwaltungsfenster zeigt **Allgemein** Standort und Verbindung. Auf der
+  Bridge lässt sich hier das Hauptprogramm koppeln. **Dienste** öffnet die
+  Installations- und Prüfaktionen für sh-guard.
+
 ## 0.9.30 — Zuletzt geteilte Ausgabe einmalig abholen
 
 - Der allgemeine Abruf bietet ausschließlich die jüngste Freigabe an, solange sie

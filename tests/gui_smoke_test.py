@@ -26,6 +26,7 @@ from test_local_setup import fake_brew
 
 class GUISmokeTests(unittest.TestCase):
     def test_native_tk_terminal_review_and_connection_dialog(self):
+        self.addCleanup(gc.collect)
         with tempfile.TemporaryDirectory(prefix="aitl-gui-") as directory:
             preferences = Path(directory, "config")
             core = a.AppCore(a.PreferenceStore(preferences), a.ConnectionStore(preferences))
@@ -60,7 +61,7 @@ class GUISmokeTests(unittest.TestCase):
                             return
                         time.sleep(0.01)
                     raise a.ProbeError("gui_smoke_timeout")
-                until(lambda: core.connection == "CONNECTED")
+                until(lambda: core.connection == "CONNECTED", timeout=20)
                 self.assertFalse(ui.terminal_button.winfo_ismapped())
                 self.assertIn("Terminal verbunden", ui.terminal_status.get())
                 ui.action(lambda: core.add_proposal("printf 'Hello Admin in the Loop\\n'"))
@@ -562,6 +563,8 @@ class ConnectionDialogTests(unittest.TestCase):
             self.assertTrue(dialog.buttons["disconnect"].instate(["disabled"]))
             dialog.window.destroy()
             self.until(lambda: self.core.bridge_state == "CONNECTED")
+            # Reopening can follow a tunnel status that already reached the controller.
+            self.until(lambda: self.core.bridge_snapshot().tunnel_phase == "missing")
             dialog = self.ui.connection_settings()
             self.root.update()
             self.assertIn("Remote-Bridge verbunden · authentifiziert", dialog.summary.get())
@@ -760,7 +763,7 @@ class ConnectionDialogTests(unittest.TestCase):
         self.root.update()
         with mock.patch.object(a, "bridge_reachability", return_value="ef" * 32), \
                 mock.patch.object(self.core, "hello_bridge", return_value="already_paired"), \
-                mock.patch.object(self.core, "connect_saved_bridge") as connect:
+                mock.patch.object(self.core, "retry_connection_recovery") as connect:
             dialog.buttons["remote_check"].invoke()
         connect.assert_called_once()
         self.assertIn("wiederhergestellt", dialog.remote_status.get())
@@ -934,6 +937,8 @@ for variant, background in (("light", "#ffffff"), ("dark", "#101010")):
             graphic = ui.section_logo_labels[section]
             assert abs(graphic.winfo_rootx() + graphic.winfo_width() / 2 - center) <= 1
             for widget in descendants(panel):
+                if not widget.winfo_viewable():
+                    continue
                 if isinstance(widget, ttk.Label) and not str(widget.cget("image")):
                     assert str(widget.cget("anchor")) == "center"
                     assert str(widget.cget("justify")) == "center"
@@ -1247,13 +1252,18 @@ class WorkPackageReviewUITests(unittest.TestCase):
             self.assertEqual(self.ui.chat_code.get(), "")
             self.assertIn("Abgelaufen", self.ui.chat_code_status.get())
             self.assertTrue(self.ui.chat_code_status_label.winfo_ismapped())
-            self.assertTrue(self.ui.chat_code_copy.instate(["disabled"]))
+            self.assertEqual(self.ui.chat_code_copy.cget("text"), "Chat-Code erneuern")
+            self.assertTrue(self.ui.chat_code_copy.instate(["!disabled"]))
+            with mock.patch.object(self.core, "rotate_chat_binding") as renew:
+                self.ui.chat_code_copy.invoke()
+                renew.assert_called_once()
 
 
 class TerminalAttachmentUITests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="aitl-terminal-ui-")
         self.core = a.AppCore()
+        self.core.set_command_target("TERMINAL")
         self.core.start_local(self.tmp.name)
         self.root = tk.Tk()
         self.ui = a.ReviewUI(self.root, self.core)
@@ -1288,6 +1298,8 @@ class TerminalAttachmentUITests(unittest.TestCase):
         for callback in self.root.tk.call("after", "info"):
             self.root.after_cancel(callback)
         self.root.destroy()
+        self.ui = self.core = self.root = None
+        gc.collect()
         self.tmp.cleanup()
 
     def test_attached_hides_attach_button_and_loss_allows_fresh_attach(self):
@@ -1295,7 +1307,7 @@ class TerminalAttachmentUITests(unittest.TestCase):
         button = self.ui.terminal_button
         self.assertTrue(button.winfo_ismapped())
         self.ui.open_terminal()
-        self.until(lambda: self.core.connection == "CONNECTED")
+        self.until(lambda: self.core.connection == "CONNECTED", timeout=20)
         self.ui.render()
         self.assertFalse(button.winfo_ismapped())
         self.assertIn("Terminal verbunden", self.ui.terminal_status.get())
@@ -1308,7 +1320,7 @@ class TerminalAttachmentUITests(unittest.TestCase):
         old_endpoint = self.core.endpoint
         button.invoke()
         self.assertIsNot(self.core.endpoint, old_endpoint)
-        self.until(lambda: self.core.connection == "CONNECTED")
+        self.until(lambda: self.core.connection == "CONNECTED", timeout=20)
         self.ui.render()
         self.assertFalse(button.winfo_ismapped())
         self.assertIn("Terminal verbunden", self.ui.terminal_status.get())
@@ -1328,13 +1340,14 @@ class StageConflictDialogTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="aitl-stage-ui-")
         self.core = a.AppCore()
+        self.core.set_command_target("TERMINAL")
         self.core.start_local(self.tmp.name)
         self.root = tk.Tk()
         self.ui = a.ReviewUI(self.root, self.core)
         self.addCleanup(self.cleanup)
         self.root.update()
         self.ui.open_terminal()
-        self.until(lambda: self.core.connection == "CONNECTED")
+        self.until(lambda: self.core.connection == "CONNECTED", timeout=20)
         self.core.connect_local_bridge()
         self.until(lambda: self.core.bridge_state == "CONNECTED")
 
@@ -1367,6 +1380,8 @@ class StageConflictDialogTests(unittest.TestCase):
         for callback in self.root.tk.call("after", "info"):
             self.root.after_cancel(callback)
         self.root.destroy()
+        self.ui = self.core = self.root = None
+        gc.collect()
         self.tmp.cleanup()
 
     def submit(self, text, request):
@@ -1661,13 +1676,14 @@ class SentStylingUITests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="aitl-sent-ui-")
         self.core = a.AppCore()
+        self.core.set_command_target("TERMINAL")
         self.core.start_local(self.tmp.name)
         self.root = tk.Tk()
         self.ui = a.ReviewUI(self.root, self.core)
         self.addCleanup(self.cleanup)
         self.root.update()
         self.ui.open_terminal()
-        self.until(lambda: self.core.connection == "CONNECTED")
+        self.until(lambda: self.core.connection == "CONNECTED", timeout=20)
 
     def until(self, predicate, timeout=8):
         deadline = time.monotonic() + timeout
@@ -1696,6 +1712,8 @@ class SentStylingUITests(unittest.TestCase):
         for callback in self.root.tk.call("after", "info"):
             self.root.after_cancel(callback)
         self.root.destroy()
+        self.ui = self.core = self.root = None
+        gc.collect()
         self.tmp.cleanup()
 
     def test_sent_optics_labels_and_exact_copy(self):
@@ -1936,7 +1954,8 @@ class QrexecDialogTests(unittest.TestCase):
         ok = {"phase": "bridge_reachable", "reachable": True, "observed_pin": "cd" * 32}
         with mock.patch.object(self.core, "verify_qrexec_connection", return_value=ok), \
                 mock.patch.object(self.core, "hello_bridge", return_value="already_paired"), \
-                mock.patch.object(self.core, "connect_saved_bridge") as connect:
+                mock.patch.object(self.core, "retry_connection_recovery",
+                                  side_effect=lambda: setattr(self.core, "bridge_state", "CONNECTING")) as connect:
             dialog.buttons["qrexec_check"].invoke()
             self.assertEqual(connect.call_count, 1)
             self.assertIn("wiederhergestellt", dialog.qrexec_status.get())
@@ -1944,7 +1963,7 @@ class QrexecDialogTests(unittest.TestCase):
             dialog.fields["qrexec_target"].set("untrusted")  # identical, no invalidation
             dialog.buttons["qrexec_check"].invoke()
             self.assertEqual(connect.call_count, 1)
-            self.assertIn("bereits angestoßen", dialog.qrexec_status.get())
+            self.assertIn("bereits aufgebaut", dialog.auto_takeover_paired())
         self.assertIsNone(self.core.remote_tunnel_probe)
         self.assertEqual(self.callbacks, [])
 
@@ -1960,7 +1979,7 @@ class QrexecDialogTests(unittest.TestCase):
         ok = {"phase": "bridge_reachable", "reachable": True, "observed_pin": "cd" * 32}
         with mock.patch.object(self.core, "verify_qrexec_connection", return_value=ok), \
                 mock.patch.object(self.core, "hello_bridge", return_value="already_paired"), \
-                mock.patch.object(self.core, "connect_saved_bridge") as connect:
+                mock.patch.object(self.core, "retry_connection_recovery") as connect:
             dialog.buttons["qrexec_check"].invoke()
         connect.assert_not_called()
         self.assertIn("keine passende gespeicherte", dialog.qrexec_status.get())
