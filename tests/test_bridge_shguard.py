@@ -15,7 +15,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import admin_in_the_loop as a
-from test_connected_mvp import ServiceHarness, request
+from test_connected_mvp import RemoteFixture, ServiceHarness, request
 
 
 def guard_bridge(case, directory, release=None):
@@ -109,6 +109,65 @@ class BridgeGuardContractTests(unittest.TestCase):
 
 
 class LocalGuardCompatibilityTests(unittest.TestCase):
+    def test_local_and_remote_services_keep_separate_bindings_across_restart(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            fixture = RemoteFixture(base / "remote", port=0)
+            self.addCleanup(fixture.close)
+            store = a.ConnectionStore(base / "personal")
+            prefs = a.PreferenceStore(base / "personal")
+            main = a.AppCore(prefs, store)
+            self.addCleanup(main.close)
+            main.set_service_location("mcp", "LOCAL")
+            main.connect_local_bridge()
+            local_profile = main.bridge_profile
+            remote = main.remote_connection()
+            requests = []
+            original = a.BridgeHTTP.request
+            def track(client, method, path, *args, **kwargs):
+                if client.profile.url == fixture.url:
+                    requests.append(path)
+                return original(client, method, path, *args, **kwargs)
+            def until(core, predicate):
+                deadline = time.monotonic() + 15
+                while time.monotonic() < deadline:
+                    core.pump()
+                    if predicate():
+                        return
+                    time.sleep(.04)
+                self.fail("Service connection timed out")
+            with mock.patch.object(a.BridgeHTTP, "request", track):
+                remote.begin_pair_remote(fixture.url, fixture.pin, fixture.code, via_qrexec=False)
+                until(main, lambda: main.bridge_state == remote.bridge_state == "CONNECTED")
+                main.set_service_location("sh-guard", "REMOTE")
+                main.guard_inspected = True
+                until(main, lambda: main.guard_status()["state"] == "INSTALL_CONFIRM")
+                self.assertEqual(main.guard_status()["instance"], remote.bridge_instance)
+                self.assertEqual(main.bridge_profile, local_profile)
+                self.assertFalse(main.risk_requested)
+                self.assertLessEqual(set(requests), {"/v1/pair/claim", "/v1/pair/confirm", "/v1/status", a.SH_GUARD_PATH})
+                self.assertIsNone(remote.chat_binding)
+                self.assertIsNone(remote.remote_tunnel_probe)
+            main.close()
+            main = a.AppCore(prefs, store)
+            self.addCleanup(main.close)
+            main.restore_services()
+            remote = main.remote_management
+            until(main, lambda: remote.bridge_state == "CONNECTED")
+            self.assertIsNone(main.bridge_worker)
+            main.guard_inspected = True
+            until(main, lambda: main.guard_status().get("instance") == remote.bridge_instance)
+            remote.disconnect_bridge()
+            self.assertEqual(main.guard_status().get("error"), "risk_bridge_disconnected")
+            main.set_service_location("sh-guard", "LOCAL")
+            main.select_mcp_location("REMOTE")
+            until(main, lambda: main.bridge_state == "CONNECTED" and main.chat_binding is not None
+                  and main.guard_status()["state"] == "INSTALL_CONFIRM")
+            self.assertEqual(main.bridge_instance, remote.bridge_instance)
+            self.assertNotEqual(main.guard_status()["instance"], main.bridge_instance)
+            self.assertEqual(main.guard_client.profile.mode, "LOCAL")
+            self.assertEqual(prefs.service_locations(), {"sh-guard": "LOCAL", "mcp": "REMOTE"})
+
     def test_unsafe_tool_directory_does_not_interrupt_local_bridge_transport(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp).resolve()

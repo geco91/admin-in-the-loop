@@ -25,14 +25,15 @@ def main():
         core = a.AppCore(connection_store=a.ConnectionStore(Path(directory)/'config'))
         root = tk.Tk()
         ui = a.ReviewUI(root, core)
+        remote = core.remote_connection()
         errors = []
         root.report_callback_exception = lambda *_: errors.append('tk callback')
         with mock.patch.object(a, 'qubes_detected', return_value=True), \
                 mock.patch.object(a, 'source_qube_name', return_value='personal'), \
                 mock.patch.object(core, 'begin_tunnel_probe'), \
-                mock.patch.object(core, 'hello_bridge') as hello, \
-                mock.patch.object(core, 'begin_pair_remote') as pair:
-            dialog = ui.connection_settings()
+                mock.patch.object(remote, 'hello_bridge') as hello, \
+                mock.patch.object(remote, 'begin_pair_remote') as pair:
+            dialog = ui.open_bridge_management()
             dialog.window.geometry('860x780+0+0')
             def capture(name):
                 dialog.canvas.yview_moveto(0)
@@ -53,7 +54,7 @@ def main():
                 capture('02-bridge-starten')
                 # Explicit failure fixture: show useful policy help without invoking Qrexec.
                 result = {'phase':'qrexec_target_unreachable','reachable':False,'observed_pin':None}
-                with mock.patch.object(core, 'verify_qrexec_connection', return_value=result):
+                with mock.patch.object(remote, 'verify_qrexec_connection', return_value=result):
                     dialog.verify_qrexec()
                 capture('02b-verbindung-pruefen')
                 dialog.qrexec_help.grid_remove()
@@ -69,6 +70,11 @@ def main():
                 profile = a.ConnectionProfile('https://127.0.0.1:8443', '0123456789abcdef'*4,
                     'b'*32, 'c'*32, 'd'*64)
                 core.bridge_profile, core.bridge_state, core.bridge_instance = profile, 'CONNECTED', 'e'*32
+                core.connection_store.save_connection(profile, qrexec={'target':'ai-bridge','port':8443})
+                core.saved_connection = remote.saved_connection = core.connection_store.load_connection()
+                dialog.window.destroy()
+                dialog = ui.connection_settings()
+                dialog.window.geometry('860x780+0+0')
                 core.remote_tunnel = {'phase':'missing'}
                 dialog.fields['qrexec_tunnel_id'].set('tunnel_'+'0123456789abcdef'*2)
                 dialog.fields['qrexec_runtime_key'].set('BEISPIEL-KEIN-ECHTER-API-KEY')
@@ -87,9 +93,9 @@ def main():
                 core.disconnect_bridge()
                 core.connection_store.save_connection(profile, None, {'target':'ai-bridge','port':8443})
                 core.saved_connection = core.connection_store.load_connection()
-                core.recovery_state, core.recovery_error = 'NEEDS_ATTENTION', 'qrexec_target_unreachable'
+                remote.recovery_state, remote.recovery_error = 'NEEDS_ATTENTION', 'qrexec_target_unreachable'
                 dialog.window.destroy()
-                dialog = ui.connection_settings()
+                dialog = ui.open_bridge_management()
                 dialog.window.geometry('860x780+0+0')
                 capture('06-wiederherstellen')
                 dialog.open_recovery_setup()

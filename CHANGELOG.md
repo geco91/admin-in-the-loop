@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.9.33 — Gemeinsame Bridge-Verbindung und Standortwahl pro Dienst
+
+- Das Zahnrad unten links öffnet die Einrichtung oder Verwaltung der externen Bridge. Eine gespeicherte Kopplung bleibt auch offline sichtbar.
+- sh-guard und Secure MCP Tunnel lassen sich unabhängig voneinander lokal oder auf der gekoppelten Bridge betreiben. Die Erstkopplung führt zum gewählten Dienst zurück.
+- Die Standortwahl liegt in einer eigenen Einstellungsdatei. Bestehende Kopplungen und empfängergebundene Freigaben bleiben lesbar.
+
 ## 0.9.32 — Rückwechsel vom Bridge-Testbranch zu main
 
 - `update geco91 main` unterstützt den Rückwechsel zu 0.9.30 auch mit einer in

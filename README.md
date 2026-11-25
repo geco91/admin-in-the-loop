@@ -16,13 +16,13 @@ weitergegeben. Das Terminal bleibt unabhängig manuell bedienbar.
 
 ## Aktuelle persönliche Testversion
 
-Der Testbranch **0.9.32** verwaltet sh-guard am Standort der Bridge. Unter
-**Befehlsprüfung → sh-guard → Einstellungen** steht das Installationsziel. Die
-gleiche Verwaltung öffnet sich im Ziel-Qube mit
-`python3 admin_in_the_loop.py --bridge --gui`. Das Hauptprogramm verwendet
-die bestehende Bridge-Verbindung auch für die Analyse. Der erste Reiter
-**Allgemein** zeigt die Verbindung und auf der Bridge die Kopplung zum Hauptprogramm.
-Unter **Dienste** verwaltest du sh-guard. Zum Testen dieses Branches auf
+Auf dem Testbranch **0.9.33** richtet das Zahnrad unten links im Hauptfenster
+die externe Bridge ein. Bei gespeicherter Kopplung zeigt es **Bridge-Verwaltung
+öffnen** und den Verbindungsstatus. Unter **Befehlsprüfung → sh-guard →
+Einstellungen** und **AI / MCP → Einrichtung & Einstellungen** wählst du den
+Standort je Dienst. Auch ein lokaler MCP-Tunnel mit externer Analyse ist möglich.
+Direkt auf dem Bridge-System öffnet `python3 admin_in_the_loop.py --bridge --gui`
+die Verwaltung mit **Allgemein** und **Dienste**. Zum Testen auf
 Hauptprogramm und Bridge jeweils `python3 admin_in_the_loop.py update geco91 feat/bridge-sh-guard`
 ausführen und die jeweilige Anwendung neu starten. [Einrichtung und Datenfluss](doc/SH_GUARD.md)
 

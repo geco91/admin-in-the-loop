@@ -369,6 +369,7 @@ class RiskGUITests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.base = Path(self.temp.name).resolve() / "config"
         self.core = a.AppCore(preference_store=a.PreferenceStore(self.base))
+        self.core.set_service_location("sh-guard", "LOCAL")
         self.core.session, self.core.connection = "GUI_TEST_SESSION", "CONNECTED"
         self.core.set_command_target("TERMINAL")
         self.core.channel = mock.Mock()

@@ -59,6 +59,18 @@ class RecoveryTests(unittest.TestCase):
         core.chat_binding_received_at = time.monotonic()
         return store, controller
 
+    def test_pairing_preserves_local_tunnel_settings_if_its_binary_is_offline(self):
+        binary = Path(self.temp.name) / "tunnel-client"
+        binary.write_bytes(b"fixture")
+        binary.chmod(0o700)
+        config = {"binary": str(binary), "tunnel_id": "tunnel_" + "a"*32, "api_key": "test_key_"*4}
+        self.store.save_connection(tunnel=config)
+        binary.unlink()
+        profile = a.ConnectionProfile("https://127.0.0.1:8443", "a"*64, "b"*32, "c"*32, "d"*64)
+        self.store.update_connection(profile=profile, qrexec={"target": "review-qube", "port": 8443})
+        self.assertEqual(self.store.load_connection()["tunnel"], config)
+        self.assertEqual(self.store.load_connection()["profile"]["controller_id"], profile.controller_id)
+
     def recovery_dialog(self):
         """Exercise existing callbacks and presentation with controlled widget boundaries."""
         profile = a.ConnectionProfile("https://127.0.0.1:8443", "a"*64, "b"*32, "c"*32, "d"*64)
@@ -71,7 +83,10 @@ class RecoveryTests(unittest.TestCase):
         dialog.location = mock.Mock(get=mock.Mock(return_value="REMOTE"))
         dialog.connection_path, dialog.recovery_notice = mock.Mock(), mock.Mock()
         dialog.recovery_panel, dialog.recovery_overview = mock.Mock(), True
-        dialog.layer_labels = {}
+        dialog.management = True
+        dialog.ui.core = self.core
+        dialog.summary = mock.Mock()
+        dialog.layer_labels = {name: mock.Mock() for name in ("Bridge", "Secure Tunnel", "Chat")}
         dialog.saved_qrexec_matches = lambda: False
         dialog.saved_matches = lambda: True
         dialog.refresh_saved = mock.Mock()

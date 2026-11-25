@@ -4953,6 +4953,38 @@ class QrexecBridgeFirstTests(unittest.TestCase):
         self.assertEqual(a.BridgeHTTP(profile).request("GET", "/v1/status")["state"], "PAIRED")
         self.assertEqual(recovered.connection_store.load_connection(), before)
 
+    def test_service_locations_reuse_one_authenticated_qube_forwarder(self):
+        main = self.make_core()
+        profile = main.pair_remote(self.bridge.url, self.bridge_pin, self.bridge.code)
+        main.connection_store.save_connection(profile, qrexec={"target": "review-qube", "port": self.bridge_port})
+        main.saved_connection = main.connection_store.load_connection()
+        main.set_service_location("mcp", "LOCAL")
+        main.set_service_location("sh-guard", "REMOTE")
+        def until(predicate):
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline:
+                main.pump()
+                if predicate():
+                    return
+                time.sleep(.04)
+            self.fail("Timed out waiting for the shared Qube connection")
+        with mock.patch.dict(os.environ, {"AITL_TEST_REMOTE_PORT": str(self.bridge_port)}):
+            main.restore_services()
+            remote = main.remote_management
+            main.guard_inspected = True
+            until(lambda: remote.bridge_state == "CONNECTED" and main.guard_status()["state"] == "INSTALL_CONFIRM")
+            self.assertEqual(main.guard_location()[1], "review-qube")
+            self.assertIsNone(main.bridge_worker)
+            forwarder = remote.qrexec_forwarder
+            pgid = forwarder.pgid
+            self.assertNotEqual(forwarder.port, self.bridge_port)
+            main.select_mcp_location("REMOTE")
+            until(lambda: main.chat_binding is not None)
+            self.assertEqual(main.guard_client.profile.forward_port, main.bridge_profile.forward_port)
+            self.assertEqual(main.bridge_profile.forward_port, forwarder.port)
+            self.assertFalse(main.qrexec_forwarder.running)
+            self.assertEqual(remote.qrexec_forwarder.pgid, pgid)
+
     def test_deny_down_plain_are_evidenced_separately_not_blanket_policy(self):
         text = a.ConnectionDialog.error_text
         dead = str(self.free_port())  # nothing listening: "target down"

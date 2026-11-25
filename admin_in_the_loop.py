@@ -46,7 +46,7 @@ from types import MappingProxyType
 # Single canonical UI/CLI version. The embedded bridge block keeps its own copy in
 # BRIDGE_SERVER_INFO; a consistency test pins both to the same value (Journal #88ff:
 # every delivered program state bumps at least the patch digit).
-APP_VERSION = "0.9.32"
+APP_VERSION = "0.9.33"
 
 
 if os.name == "posix":
@@ -1561,8 +1561,27 @@ OUTPUT_MODES = {
 # Authored UI text only: payloads, protocol identifiers and third-party output
 # never pass through this catalog. Kept inline for single-file installations.
 UI_ENGLISH = {
+    "Externe Bridge einrichten": "Setup Remote Bridge",
+    "Bridge-Verwaltung öffnen": "Open Bridge Management",
+    "Externe Bridge": "Remote bridge",
+    "Auf diesem Rechner": "On this computer",
+    "Über die externe Bridge": "Use remote bridge",
+    "Wo soll sh-guard laufen?": "Where should sh-guard run?",
+    "Wo soll der Secure MCP Tunnel laufen?": "Where should the Secure MCP Tunnel run?",
+    "Zuerst die externe Bridge koppeln.": "Pair the remote bridge first.",
+    "AI / MCP · Einrichtung & Einstellungen": "AI / MCP · Setup & Settings",
+    "Externe Bridge · Allgemein": "Remote Bridge · General",
+    "Verbindungsweg auswählen": "Choose how to connect",
+    "Verbindung im Ziel-Qube einrichten": "Connect to another Qube",
+    "Über HTTPS verbinden": "Connect over HTTPS",
+    "Adresse und Pfade prüfen, den Startbefehl auf dem Bridge-Rechner ausführen und die Verbindung testen.": "Check the address and paths, run the start command on the bridge host, then test the connection.",
+    "Die Kopplung gilt für alle Dienste auf dieser Bridge.": "Services on this bridge share this pairing.",
+    "Gekoppelt · offline": "Paired · offline",
+    "Verbindung zur externen Bridge wird aufgebaut.": "Connecting to the remote bridge.",
+    "Externe Bridge offline. Die Verbindung lässt sich unten links im Hauptfenster verwalten.": "Remote bridge offline. Manage the connection in the lower-left corner of the main window.",
+    "Gekoppelt · wird verbunden": "Paired · connecting",
+    "Gekoppelt · verbunden": "Paired · connected",
     "Lokale Bridge": "Local bridge",
-    "Bridge-Verwaltung öffnen": "Open bridge management",
     "Befehle einschließlich lokaler Änderungen zur Analyse an %s senden?": "Send commands including local edits to %s for analysis?",
     'verbunden': 'connected',
     'offen': 'pending',
@@ -2309,6 +2328,22 @@ class PreferenceStore:
 
     def load_command_risk(self):
         return self.command_risk_recipient() is not None
+
+    def service_locations(self):
+        routes = self._read("service-locations.json")
+        if routes is None:
+            return {}
+        require(type(routes) is dict and all(re.fullmatch(r"[a-z][a-z0-9-]{0,63}", name)
+                and value in ("LOCAL", "REMOTE") for name, value in routes.items()), "invalid_preferences")
+        return routes
+
+    def save_service_location(self, service, location):
+        require(service in ("mcp", "sh-guard") and location in ("LOCAL", "REMOTE"), "invalid_preferences")
+        # Older stable versions can still open the regular preferences and connection files.
+        with self._settings():
+            routes = self.service_locations()
+            routes[service] = location
+            self._save(routes, "service-locations.json")
 
     def command_risk_recipient(self):
         with self._settings() as value:
@@ -3548,7 +3583,7 @@ class ShellGuardService:
             worker.join(timeout=3)
 
 
-def build_guard_settings(parent, location, read, perform, *, english=False):
+def build_guard_settings(parent, location, read, perform, *, english=False, compact=False):
     """One service panel shared by Command Review and Bridge management."""
     import tkinter as tk
     from tkinter import messagebox, ttk
@@ -3556,14 +3591,14 @@ def build_guard_settings(parent, location, read, perform, *, english=False):
     def label(de, en):
         return en if english else de
 
-    frame = ttk.Frame(parent, padding=14)
+    frame = ttk.Frame(parent, padding=(8, 2) if compact else 14)
     window = frame.winfo_toplevel()
     frame.pack(fill="both", expand=True)
     frame.columnconfigure(0, weight=1)
     heading = ttk.Label(frame, font="TkHeadingFont", wraplength=420)
     heading.grid(row=0, column=0, sticky="w")
     summary = ttk.Label(frame)
-    summary.grid(row=1, column=0, sticky="w", pady=(6, 0))
+    summary.grid(row=1, column=0, sticky="w", pady=(2 if compact else 6, 0))
     hint = ttk.Label(frame, wraplength=420, justify="left")
     hint.grid(row=2, column=0, sticky="w", pady=(0, 8))
     def fit(event):
@@ -3690,8 +3725,8 @@ def build_guard_settings(parent, location, read, perform, *, english=False):
 
 
 def show_bridge_management(parent, location, connection_state, build_services, *, english=False,
-                           pairing=None, configure_connection=None):
-    """Open the same management notebook on the bridge or as a controller child window."""
+                           pairing=None):
+    """Manage pairing and installed services directly on the bridge host."""
     import tkinter as tk
     from tkinter import messagebox, ttk
 
@@ -3726,17 +3761,14 @@ def show_bridge_management(parent, location, connection_state, build_services, *
     def pair():
         pin, new_code = pairing
         messagebox.showinfo(pair_button.cget("text"),
-                            label("Diesen Einmalcode im Hauptprogramm unter „Verbindung einstellen“ eingeben.",
-                                  "Enter this one-time code in Connection settings in the main application.")
+                            label("Diesen Einmalcode im Hauptprogramm bei der Einrichtung der externen Bridge eingeben.",
+                                  "Enter this one-time code in the main application when pairing the remote bridge.")
                             + "\n\n" + new_code() + "\n\nSPKI SHA-256\n" + pin, parent=window)
 
     pair_button = None
     if pairing is not None:
         pair_button = ttk.Button(general, command=pair)
         pair_button.grid(row=4, column=0, sticky="w")
-    elif configure_connection is not None:
-        ttk.Button(general, text=label("Verbindung einstellen", "Connection settings"), command=configure_connection).grid(
-            row=4, column=0, sticky="w")
     timer = None
 
     def refresh():
@@ -4239,6 +4271,19 @@ def validate_remote_tunnel(value):
 
 class ConnectionStore(PreferenceStore):
     """Separate private config. Only connection credentials, never approvals."""
+    def update_connection(self, **changes):
+        directory = self._directory_fd()
+        try:
+            fcntl.flock(directory, fcntl.LOCK_EX)
+            saved = self.load_connection() or {}
+            profile = ConnectionProfile(**saved["profile"]) if saved.get("profile") else None
+            record = dict(profile=profile, tunnel=saved.get("tunnel"), qrexec=saved.get("qrexec"))
+            record.update(changes)
+            self.save_connection(**record, verify_tunnel_binary="tunnel" in changes)
+            return self.load_connection()
+        finally:
+            os.close(directory)
+
     def load_connection(self):
         dfd = self._directory_fd()
         try:
@@ -4277,13 +4322,13 @@ class ConnectionStore(PreferenceStore):
         finally:
             os.close(dfd)
 
-    def save_connection(self, profile=None, tunnel=None, qrexec=None):
+    def save_connection(self, profile=None, tunnel=None, qrexec=None, *, verify_tunnel_binary=True):
         self.load_connection()  # Reject malformed, insecure or symlinked existing state.
         if profile is not None:
             check_profile(profile)
             require(profile.mode == "REMOTE", "local_tokens_not_persistent")
         if tunnel is not None:
-            validate_tunnel(tunnel)
+            validate_tunnel(tunnel, check_binary=verify_tunnel_binary)
         if qrexec is not None:
             fields(qrexec, {"target", "port"})
             validate_qube_name(qrexec["target"])
@@ -5426,7 +5471,7 @@ class LocalSetupPreparation:
 
 class BridgeWorker:
     """Network worker with bounded queues. It cannot call AppCore or approve()."""
-    def __init__(self, profile, preference, generation, cursor="", poll_enabled=True):
+    def __init__(self, profile, preference, generation, cursor="", poll_enabled=True, *, status_only=False):
         check_profile(profile)
         self.profile, self.preference, self.generation = profile, preference, generation
         self.client = BridgeHTTP(profile)
@@ -5434,6 +5479,7 @@ class BridgeWorker:
         self.stop = threading.Event()
         self.cursor = cursor
         self.poll_enabled = poll_enabled
+        self.status_only = status_only
         self.thread = threading.Thread(target=self.run, name="aitl-transport", daemon=True)
         self.thread.start()
 
@@ -5472,12 +5518,20 @@ class BridgeWorker:
                         # Idempotent confirm supports recovery after a lost confirm response.
                         status = self.client.request("POST", "/v1/pair/confirm", {"version": 1})
                         instance = validate_status(status, self.profile)
-                        self.client.request("PUT", "/v1/preferences", {"version": 1, "block_size": self.preference})
+                        if not self.status_only:
+                            self.client.request("PUT", "/v1/preferences", {"version": 1, "block_size": self.preference})
                         self.emit("connected", instance)
                         self.emit("certificate_warning", self.client.certificate_warning)
-                        self.emit_chat_binding(instance)
+                        if not self.status_only:
+                            self.emit_chat_binding(instance)
                         next_binding_check = time.monotonic() + 2
                         delay = 1
+                    if self.status_only:
+                        if self.stop.wait(2):
+                            break
+                        status = self.client.request("GET", "/v1/status", cancel=self.stop)
+                        require(validate_status(status, self.profile) == instance, "network_instance_changed")
+                        continue
                     while not self.commands.empty():
                         name, value = self.commands.get_nowait()
                         if name == "advance":
@@ -5755,7 +5809,12 @@ class SavedForwarderPreparation:
 
 class AppCore:
     """Same local actions for Tkinter and tests. No server can call approve()."""
-    def __init__(self, preference_store=None, connection_store=None):
+    def __init__(self, preference_store=None, connection_store=None, *, management_only=False):
+        self.management_only = management_only
+        self.remote_management = None
+        self.remote_mcp_binding = None
+        self.use_remote_mcp = False
+        self.locations = preference_store.service_locations() if preference_store is not None else {}
         self.endpoint = None
         self.channel = None
         self.connection = "DISCONNECTED"
@@ -5860,15 +5919,125 @@ class AppCore:
         if self.guard_consent is not None:
             self.risk_requested = self.guard_consent == self.guard_location()[0]
 
-    def guard_location(self):
-        profile = self.bridge_profile
+    def saved_remote(self):
+        owner = self.remote_management or self
+        return owner.saved_connection or {}
+
+    def service_location(self, service):
+        if service in self.locations:
+            return self.locations[service]
+        if service == "sh-guard" and self.guard_consent is not None:
+            if self.guard_consent != "local":
+                return "REMOTE"
+            if not self.saved_remote().get("profile") and not self.saved_remote().get("qrexec"):
+                return "LOCAL"
+        # An existing MCP setup retains its previous location. Enrolling the first
+        # external bridge separately records LOCAL before saving a new pairing.
+        if service == "mcp":
+            return "REMOTE" if self.saved_remote().get("profile") else "LOCAL"
+        return None
+
+    def set_service_location(self, service, location):
+        require(service in ("sh-guard", "mcp") and location in ("LOCAL", "REMOTE"), "invalid_preferences")
+        if self.locations.get(service) == location:
+            return
+        previous_host = self.guard_location()[0] if service == "sh-guard" else None
+        if self.preference_store is not None:
+            self.preference_store.save_service_location(service, location)
+        self.locations[service] = location
+        if service == "sh-guard":
+            host = self.guard_location()[0]
+            if host != previous_host:
+                self._drop_guard_client()
+            self.risk_requested = self.guard_consent == host
+
+    def remote_connection(self):
+        if self.remote_management is None:
+            require(not self.management_only, "invalid_bridge_mode")
+            self.remote_management = AppCore(connection_store=self.connection_store, management_only=True)
+        return self.remote_management
+
+    def restore_services(self):
+        remote = self.saved_remote().get("profile")
+        if remote:
+            self.remote_connection().begin_connection_recovery()
+        if self.service_location("mcp") == "REMOTE":
+            self.use_remote_mcp = True
+        elif (self.saved_connection or {}).get("tunnel"):
+            self.begin_connection_recovery()
+
+    def select_mcp_location(self, location):
+        if location == "REMOTE":
+            remote = self.remote_connection()
+            require(remote.saved_remote().get("profile"), "no_saved_remote_connection")
+            if remote.bridge_state in ("DISCONNECTED", "BLOCKED") and remote.recovery_state != "PREPARING":
+                remote.retry_connection_recovery()
+        self.set_service_location("mcp", location)
+        self.use_remote_mcp = location == "REMOTE"
+        if self.bridge_state != "CONNECTED" or location == "LOCAL":
+            self.remote_mcp_binding = None
+        if self.bridge_profile and self.bridge_profile.mode != location:
+            self.disconnect_bridge()
+            self.bridge_profile = None
+        self._sync_remote_mcp()
+
+    def _sync_remote_mcp(self):
+        remote = self.remote_management
+        if not self.use_remote_mcp or remote is None:
+            return
+        binding = remote.paired_remote_binding()
+        if binding == self.remote_mcp_binding:
+            return
+        self.remote_mcp_binding = binding
+        if binding is None:
+            self.disconnect_bridge()
+        else:
+            self.connect_profile(remote.bridge_profile)
+            self.recovery_chat_recipient = remote.bridge_profile.recipient
+
+    def paired_remote_binding(self):
         saved = self.saved_connection or {}
+        record = saved.get("profile")
+        active = self.bridge_profile
+        if not record or not active or active.recipient != ConnectionProfile(**record).recipient:
+            return None
+        qube = saved.get("qrexec")
+        if qube and (self.qrexec_forwarder.target, self.qrexec_forwarder.remote_port) != (qube["target"], qube["port"]):
+            return None
+        return self._bridge_binding()
+
+    def external_bridge_status(self):
+        saved = self.saved_remote()
+        record = saved.get("profile")
+        if not record:
+            return None, ""
+        site = (saved.get("qrexec") or {}).get("target") or record["url"]
+        remote = self.remote_management or self
+        if remote.paired_remote_binding():
+            return site, tr("Gekoppelt · verbunden")
+        if remote.recovery_state == "PREPARING" or remote.bridge_state in ("CONNECTING", "RETRYING", "PAIRING"):
+            return site, tr("Gekoppelt · wird verbunden")
+        return site, tr("Gekoppelt · offline")
+
+    def _guard_owner(self):
+        location = self.service_location("sh-guard")
+        if location == "REMOTE" and self.remote_management is not None:
+            return self.remote_management
+        return self
+
+    def guard_location(self):
+        choice = self.service_location("sh-guard")
+        if choice == "LOCAL":
+            return "local", tr("Lokale Bridge")
+        owner = self._guard_owner()
+        profile = owner.bridge_profile
+        saved = owner.saved_connection or {}
         remote = profile if profile and profile.mode == "REMOTE" else None
-        if profile is None and saved.get("profile"):
+        if (profile is None or choice == "REMOTE") and saved.get("profile"):
             remote = ConnectionProfile(**saved["profile"])
-        if remote is None and profile is None and saved.get("qrexec"):
-            qube = saved["qrexec"]["target"]
-            return hashlib.sha256(net_json(("unpaired", qube))).hexdigest(), qube
+        if remote is None and (choice == "REMOTE" or profile is None and saved.get("qrexec")):
+            qube = (saved.get("qrexec") or {}).get("target")
+            return hashlib.sha256(net_json(("unpaired", qube))).hexdigest(), qube or tr("Externe Bridge")
         if remote is None:
             return "local", tr("Lokale Bridge")
         qube = (saved.get("qrexec") or {}).get("target") if remote.forward_port or (
@@ -5888,11 +6057,16 @@ class AppCore:
         if self.guard_closed:
             return {"state": "DISABLED", "instance": None}
         identity, _ = self.guard_location()
-        connected = self.bridge_state == "CONNECTED" and self.bridge_profile is not None
+        owner = self._guard_owner()
+        profile = owner.bridge_profile
+        connected = (owner.bridge_state == "CONNECTED" and profile is not None
+                     and (profile.mode == "LOCAL") == (identity == "local"))
+        if connected and profile.mode == "REMOTE" and (owner.saved_connection or {}).get("profile"):
+            connected = owner.paired_remote_binding() is not None
         if self.risk_requested and self.guard_consent != identity:
             self.risk_requested = False
             self._command_risk.configure()
-        route = (identity, self.bridge_instance, self.bridge_generation) if connected else (identity, None)
+        route = (identity, owner.bridge_instance, owner.bridge_generation) if connected else (identity, None)
         if route != self.guard_route:
             self._drop_guard_client()
             self.guard_route = route
@@ -5902,8 +6076,8 @@ class AppCore:
             if not (self.guard_inspected or self.risk_requested):
                 return {"state": "DISABLED", "instance": None}
             directory = self.preference_store.directory if self.preference_store else preference_directory()
-            self.guard_client = BridgeGuardClient(self.bridge_profile if connected else None,
-                                                 self.bridge_instance if connected else None, directory)
+            self.guard_client = BridgeGuardClient(profile if connected else None,
+                                                 owner.bridge_instance if connected else None, directory)
         return self.guard_client.status
 
     def guard_action(self, action, previous):
@@ -5911,21 +6085,15 @@ class AppCore:
         require(self.guard_client is not None and previous == current, "risk_stale")
         self.guard_client.action(action, previous)
 
-    def guard_connection_state(self):
-        if (self.bridge_state == "DISCONNECTED" and self.guard_location()[0] == "local"
-                and self.guard_route == ("local", None) and self.guard_client is not None):
-            status = self.guard_client.status
-            if status.get("instance"):
-                return "LOCAL_SERVICE"
-            if status["state"] == "CHECKING_TOOL":
-                return "CONNECTING"
-        return self.bridge_state
-
     def request_command_risk(self, enabled, *, persist=True):
         self._command_risk._owner()
         require(type(enabled) is bool, "risk_enable")
         host = self.guard_location()[0]
         if not enabled:
+            previous = self.service_location("sh-guard")
+            if persist and previous and "sh-guard" not in self.locations:
+                # Retain the location inferred from pre-0.9.33 consent when the user disables analysis.
+                self.set_service_location("sh-guard", previous)
             self.risk_requested = False
             self._command_risk.configure()
             self.risk_setup_state, self.risk_setup_error = "DISABLED", None
@@ -5986,7 +6154,8 @@ class AppCore:
         return self.bridge_profile.recipient + (self.bridge_instance, self.bridge_generation)
 
     def _invalidate_bridge_review(self):
-        self._drop_guard_client()
+        if self._guard_owner() is self and self.guard_route and len(self.guard_route) == 3:
+            self._drop_guard_client()
         if self.review_state == "TAKE_PENDING" and self.pending_take is not None:
             # Bridge loss during a pending take: discard locally (restore prior state,
             # devalue the nonce); a bridge-committed TAKEN is never rolled back and a
@@ -6024,6 +6193,7 @@ class AppCore:
 
     def connect_profile(self, profile):
         check_profile(profile)
+        require(not self.management_only or profile.mode == "REMOTE", "invalid_bridge_mode")
         same_recipient = self.bridge_profile is not None and self.bridge_profile.recipient == profile.recipient
         self.disconnect_bridge()
         if not same_recipient:
@@ -6040,7 +6210,7 @@ class AppCore:
         self.certificate_warning = False
         self.worker_id += 1
         self.bridge_worker = BridgeWorker(profile, self.preferences, self.worker_id,
-                                          self.bridge_cursor, not self.inbox)
+                                          self.bridge_cursor, not self.inbox, status_only=self.management_only)
 
     def reconnect_bridge(self):
         require(self.bridge_profile is not None, "no_previous_connection")
@@ -6059,7 +6229,7 @@ class AppCore:
         self.chat_binding_error = None
         self.bridge_state, self.bridge_error = "CONNECTING", None
         self.bridge_worker = BridgeWorker(self.bridge_profile, self.preferences, self.worker_id,
-                                          self.bridge_cursor, not self.inbox)
+                                          self.bridge_cursor, not self.inbox, status_only=self.management_only)
 
     def connect_local_bridge(self):
         self.disconnect_bridge()
@@ -6100,6 +6270,10 @@ class AppCore:
         self.recovery_started = True
         self.recovery_error = None
         saved = self.saved_connection
+        if saved and self.management_only:
+            saved = dict(saved, tunnel=None)
+        elif saved and self.service_location("mcp") == "LOCAL":
+            saved = dict(saved, profile=None, qrexec=None)
         if not saved or not (saved.get("profile") or saved.get("tunnel")):
             return
         if not automatic:
@@ -6190,15 +6364,16 @@ class AppCore:
                 self.recovery_state = "RESTORED"
                 self.recovery_deadline = None
                 self.recovery_watch_at = now + 1
-                if self.bridge_profile.mode == "REMOTE":
+                if self.bridge_profile.mode == "REMOTE" and not self.management_only:
                     self.recovery_chat_recipient = self.bridge_profile.recipient
-                if self.bridge_profile.mode == "REMOTE" and self.remote_tunnel_probe is None:
+                if self.bridge_profile.mode == "REMOTE" and not self.management_only and self.remote_tunnel_probe is None:
                     self.begin_tunnel_probe()
             elif self.bridge_state == "BLOCKED" or self.local_setup_state == "FAILED":
                 self._recovery_failure(self.bridge_error or self.local_setup_error)
             elif self.recovery_deadline is not None and now >= self.recovery_deadline:
                 self._recovery_failure("network_timeout")
-        elif (self.recovery_state == "RESTORED" and (self.saved_connection or {}).get("qrexec")
+        elif (self.recovery_state == "RESTORED" and self.service_location("mcp") == "REMOTE"
+              and (self.saved_connection or {}).get("qrexec")
               and self.recovery_target == self._saved_recovery_target() and now >= self.recovery_watch_at):
             self.recovery_watch_at = now + 1
             if self.bridge_state in {"RETRYING", "BLOCKED"}:
@@ -6304,11 +6479,17 @@ class AppCore:
         self.chat_binding_error = None
         self.chat_binding_notice = None
 
-    def pair_remote(self, url, pin, code):
+    def pair_remote(self, url, pin, code, *, via_qrexec=None):
         """Synchronous headless setup action; no terminal or review side effects."""
         require(self.connection_store is not None, "connection_store_required")
         normalized_pin = re.sub(r"[\s:-]", "", bounded_string(pin, 128)).lower()
         provisional = ConnectionProfile(url.rstrip("/"), normalized_pin, "0" * 32, "0" * 32, "0" * 64)
+        saved = self.connection_store.load_connection() or {}
+        qrexec = saved.get("qrexec") if via_qrexec is None else self.qrexec if via_qrexec else None
+        if qrexec and self.qrexec_forwarder.running:
+            require(self.qrexec_forwarder.target == qrexec["target"]
+                    and self.qrexec_forwarder.remote_port == qrexec["port"], "saved_connection_mismatch")
+            provisional = replace(provisional, forward_port=self.qrexec_forwarder.port)
         client = BridgeHTTP(provisional)
         claim = client.request("POST", "/v1/pair/claim",
                                {"code": bounded_string(code, 16), "request_id": uuid.uuid4().hex}, authenticate=False)
@@ -6316,21 +6497,19 @@ class AppCore:
         require(type(claim["version"]) is int and claim["version"] == 1 and claim["state"] == "PAIR_PENDING", "pair_schema")
         profile = replace(provisional, conversation=claim["conversation"], controller_id=claim["controller_id"], token=claim["token"])
         check_profile(profile)
-        saved = self.connection_store.load_connection()
-        self.connection_store.save_connection(profile, saved["tunnel"] if saved else None,
-                                              saved.get("qrexec") if saved else None)
+        self.connection_store.update_connection(profile=profile, qrexec=qrexec)
         # Save before confirm. On lost confirm response, connect_saved_bridge recovers
         # idempotently with this exact already-pinned credential, no code reuse.
         validate_status(BridgeHTTP(profile).request("POST", "/v1/pair/confirm", {"version": 1}), profile)
         return profile
 
-    def begin_pair_remote(self, url, pin, code):
+    def begin_pair_remote(self, url, pin, code, *, via_qrexec=None):
         require(self.pair_thread is None or not self.pair_thread.is_alive(), "pair_already_running")
         self.disconnect_bridge()
         self.bridge_state = "PAIRING"
         def run():
             try:
-                result = self.pair_remote(url, pin, code)
+                result = self.pair_remote(url, pin, code, via_qrexec=via_qrexec)
                 self.pair_events.put_nowait(("paired", result))
             except Exception as exc:
                 reason = str(exc) if isinstance(exc, ProbeError) else "pair_failed"
@@ -6341,10 +6520,7 @@ class AppCore:
     def configure_tunnel(self, binary, tunnel_id, api_key):
         require(self.connection_store is not None, "connection_store_required")
         config = {"binary": binary, "tunnel_id": tunnel_id, "api_key": api_key}
-        saved = self.connection_store.load_connection()
-        profile = ConnectionProfile(**saved["profile"]) if saved and saved["profile"] else None
-        self.connection_store.save_connection(profile, config, saved.get("qrexec") if saved else None)
-        self.saved_connection = self.connection_store.load_connection()
+        self.saved_connection = self.connection_store.update_connection(tunnel=config)
 
     def start_qrexec_forwarder(self, target, port=8443):
         """M9: start Main's own forwarder only. The dom0 policy line is produced for
@@ -6355,10 +6531,9 @@ class AppCore:
         target = validate_qube_name(target)
         self.qrexec_forwarder.start(target, port)
         self.qrexec = {"target": target, "port": int(port)}
-        saved = self.connection_store.load_connection()
-        profile = ConnectionProfile(**saved["profile"]) if saved and saved["profile"] else None
-        self.connection_store.save_connection(profile, saved["tunnel"] if saved else None, self.qrexec)
-        self.saved_connection = self.connection_store.load_connection()
+        saved = self.connection_store.load_connection() or {}
+        if not saved.get("profile") or saved.get("qrexec") == self.qrexec:
+            self.saved_connection = self.connection_store.update_connection(qrexec=self.qrexec)
 
     def stop_qrexec_forwarder(self):
         if self.recovery_preparation is not None:
@@ -6427,7 +6602,8 @@ class AppCore:
             return {"phase": str(exc), "reachable": False, "observed_pin": None}
         saved = self.saved_connection or {}
         record = saved.get("profile")
-        if record and record["url"].rstrip("/") == url and record["pin"]:
+        if (record and record["url"].rstrip("/") == url and record["pin"]
+                and saved.get("qrexec") in (None, {"target": target, "port": port})):
             # A changed certificate is evidenced here; silent trust is impossible.
             if not hmac.compare_digest(record["pin"], observed):
                 self._qrexec_note("reachability-probe", "pin_mismatch", None,
@@ -6446,7 +6622,7 @@ class AppCore:
         only the strict contract state pairing_required/already_paired."""
         try:
             parsed = urlsplit(url)
-            qrexec = (self.saved_connection or {}).get("qrexec")
+            qrexec = self.qrexec or (self.saved_connection or {}).get("qrexec")
             forwarder = self.qrexec_forwarder
             routed = (qrexec and parsed.hostname == "127.0.0.1" and parsed.port == qrexec["port"]
                       and (forwarder.target, forwarder.remote_port) == (qrexec["target"], qrexec["port"])
@@ -6558,10 +6734,7 @@ class AppCore:
             if failure:
                 self.local_setup_error = failure
             if self.tunnel.state == "READY" and polling:
-                saved = self.connection_store.load_connection()
-                remote = ConnectionProfile(**saved["profile"]) if saved and saved["profile"] else None
-                self.connection_store.save_connection(remote, self.local_pending)
-                self.saved_connection = self.connection_store.load_connection()
+                self.saved_connection = self.connection_store.update_connection(tunnel=self.local_pending)
                 self.local_pending = None
                 self.local_setup_state, self.local_setup_error = "CONNECTED", None
         except ProbeError as exc:
@@ -6659,6 +6832,8 @@ class AppCore:
                                   "Beleg: Bridge hat claim/confirm akzeptiert; Profil-Pin gebunden",
                                   "Chat-Code bewusst binden; keine automatische Freigabe")
             elif kind == "pair_error" and self.bridge_state == "PAIRING":
+                if self.management_only:
+                    self.saved_connection = self.connection_store.load_connection()
                 self.bridge_state, self.bridge_error = "BLOCKED", value
                 self._qrexec_note("pairing", str(value), None,
                                   "Belegt: Kopplung fehlgeschlagen; Grund oben, keine Codes in Logs",
@@ -6677,7 +6852,7 @@ class AppCore:
                     self.bridge_generation += 1
                     self.bridge_instance = value
                     self.bridge_state, self.bridge_error = "CONNECTED", None
-                    if self.bridge_profile.mode == "REMOTE":
+                    if self.bridge_profile.mode == "REMOTE" and not self.management_only:
                         self.begin_tunnel_probe()
                     # A queued item remains locally unreviewed; new review binds anew.
                 elif kind == "disconnected":
@@ -7287,6 +7462,9 @@ class AppCore:
 
     def pump(self):
         try:
+            if self.remote_management is not None:
+                self.remote_management.pump()
+                self._sync_remote_mcp()
             self._pump_local_setup()
             self._pump_bridge()
             self._pump_connection_recovery()
@@ -7390,6 +7568,9 @@ class AppCore:
 
     def close(self):
         self.guard_closed = True
+        if self.remote_management is not None:
+            self.remote_management.close()
+            self.remote_management = None
         self._drop_guard_client()
         self.risk_requested = False
         self._command_risk.close()
@@ -7697,17 +7878,20 @@ def local_setup_summary(core):
 
 class ConnectionDialog:
     """One contextual setup window; all operations use existing local core actions."""
-    def __init__(self, ui):
-        self.ui, self.core = ui, ui.core
+    def __init__(self, ui, *, management=False):
+        self.ui, self.management = ui, management
+        self.core = ui.core.remote_connection() if management else ui.core
         self.tk, self.ttk = ui.tk, ui.ttk
         if self.core.connection_store is not None:
             # Also recover a protected claim saved while the settings window was closed.
             self.core.saved_connection = self.core.connection_store.load_connection()
         self.window = self.tk.Toplevel(ui.root)
-        self.window.title(tr("AI / MCP — Verbindung einrichten"))
-        self.window.geometry("%dx%d" % (min(860, ui.root.winfo_screenwidth() - 40),
-                                       min(780, ui.root.winfo_screenheight() - 80)))
-        self.window.minsize(640, 480)
+        self.window.title(tr("Externe Bridge · Allgemein") if management else tr("AI / MCP · Einrichtung & Einstellungen"))
+        self.window.transient(ui.root)
+        self.wizard_size = "%dx%d" % (min(860, ui.root.winfo_screenwidth() - 40),
+                                     min(780, ui.root.winfo_screenheight() - 80))
+        self.window.geometry(self.wizard_size)
+        self.window.minsize(640, 340 if management else 480)
         self.window.columnconfigure(0, weight=1)
         self.window.rowconfigure(1, weight=1)
         self.busy = False
@@ -7732,7 +7916,8 @@ class ConnectionDialog:
         self.last_diagnostic = None
         saved = self.core.saved_connection or {"profile": None, "tunnel": None}
         profile = saved["profile"] or {}
-        self.recovery_overview = bool(saved.get("profile") or saved.get("tunnel")) and self.core.bridge_state != "CONNECTED"
+        self.recovery_overview = bool(profile) if management else bool(saved.get("tunnel") and
+            self.core.service_location("mcp") == "LOCAL" and self.core.bridge_state != "CONNECTED")
         # M9: three explicit connection kinds; Qrexec appears only on real Qubes,
         # remote HTTPS stays available everywhere (also on Qubes).
         self.qubes = qubes_detected()
@@ -7744,6 +7929,9 @@ class ConnectionDialog:
                                          active.mode if active else
                                          "QREXEC" if self.qubes and saved.get("qrexec") else
                                          "REMOTE" if profile else "CARD")
+        if (not management and active is None and self.core.local_setup_state == "IDLE"
+                and self.core.service_location("mcp") == "LOCAL"):
+            self.location.set("LOCAL" if saved.get("tunnel") or "mcp" in self.core.locations else "CARD")
         self.compared = self.tk.BooleanVar(master=self.window, value=False)
         base = self.ttk.Style(self.window).lookup("TFrame", "background") or self.window.cget("background")
         self.canvas = self.tk.Canvas(self.window, highlightthickness=0, background=base)
@@ -7786,18 +7974,14 @@ class ConnectionDialog:
         self.cards = self.ttk.Frame(bridge_section)
         self.cards.columnconfigure(0, weight=1)
         self.location_buttons = []
-        card_choices = [("LOCAL", tr("1 · Direkt lokal – einfachster Weg"),
-                         tr("Bridge wird vom Hauptprogramm auf demselben System gestartet.\nGeringe Isolation und wenige Abhängigkeiten dort; keine\nNetzwerk-Konfiguration nötig.")),
-                        ]
-        if self.qubes:
-            card_choices.append(("QREXEC", tr("2 · Anderes Qube – geführt einrichten (Qubes OS)"),
-                                 tr("Die Bridge läuft in einem getrennten Qube, erreichbar über\nqrexec. AITL führt gemeinsam durch Startbefehl, Verbindung und\nHallo-Kopplung – dom0-Freigaben bleiben manuell bei dir.")))
-        card_choices.append(("REMOTE", tr("3 · Externe Bridge (z. B. LAN-Rechner/Gateway)"),
-                             tr("Bridge läuft auf einem anderen Rechner; Verbindung über das\nbestehende sichere HTTPS-Pin-Verfahren. Nur HTTPS – keine\nunverschlüsselte HTTP-Abschwächung.")))
-        for index, (value, title, description) in enumerate(card_choices):
-            button = self.ttk.Radiobutton(self.cards, text="%s\n\n%s" % (title, description),
-                                          variable=self.location, value=value,
-                                          padding=12, command=self.select_location)
+        if management:
+            card_choices = ([("QREXEC", tr("Verbindung im Ziel-Qube einrichten"))] if self.qubes else [])
+            card_choices.append(("REMOTE", tr("Über HTTPS verbinden")))
+        else:
+            card_choices = [("LOCAL", tr("Auf diesem Rechner")), ("REMOTE", tr("Über die externe Bridge"))]
+        for index, (value, title) in enumerate(card_choices):
+            button = self.ttk.Radiobutton(self.cards, text=title, variable=self.location, value=value,
+                                          padding=12, command=self.choose_location)
             button.grid(row=index, column=0, sticky="ew", pady=5)
             self.location_buttons.append(button)
         self.label(self.cards, len(card_choices),
@@ -8033,7 +8217,7 @@ class ConnectionDialog:
                    "Kein App-Key oder Admin-Key. Auch dessen Benutzer benötigt Read + Use. Die App findet/installiert "
                    "den Client und richtet die lokale Verbindung automatisch ein. Den Tunnel der richtigen Platform-"
                    "Organisation und dem gewünschten ChatGPT-Workspace zuordnen."))
-        config = saved["tunnel"] or {}
+        config = {} if management else saved["tunnel"] or {}
         self.entry(self.local_inputs, 1, "tunnel_id", tr("Tunnel-ID"), config.get("tunnel_id", ""))
         self.entry(self.local_inputs, 2, "api_key", "Runtime API key", config.get("api_key", ""), secret=True)
         self.button(self.local_inputs, 3, "tunnel_help", tr("Tunnel-ID beschaffen · OpenAI Platform"), "tunnel",
@@ -8096,8 +8280,13 @@ class ConnectionDialog:
         self.summary_label = self.ttk.Label(footer, textvariable=self.summary, justify="left", wraplength=540)
         self.summary_label.grid(row=1, column=0, sticky="ew")
         self.ttk.Button(footer, text=tr("Schließen"), command=self.window.destroy).grid(row=1, column=1, padx=(12, 0))
-        self.ttk.Label(footer, text=tr("Schließen lässt laufende Verbindungen bestehen.")).grid(
-            row=2, column=0, columnspan=2, sticky="w", pady=(6,0))
+        if not management:
+            self.ttk.Label(footer, text=tr("Schließen lässt laufende Verbindungen bestehen.")).grid(
+                row=2, column=0, columnspan=2, sticky="w", pady=(6,0))
+        self.remote_required = self.ttk.Frame(bridge_section)
+        self.label(self.remote_required, 0, tr("Zuerst die externe Bridge koppeln."))
+        self.ttk.Button(self.remote_required, text=tr("Externe Bridge einrichten"),
+            command=lambda: self.ui.open_bridge_management("mcp")).grid(row=1, column=0, sticky="w", pady=6)
         self.simplify_connection_pages()
         self.location.trace_add("write", lambda *_: self.select_location())
         for key in ("url", "remote_python", "remote_script", "remote_state", "remote_bind"):
@@ -8124,7 +8313,7 @@ class ConnectionDialog:
                 if isinstance(widget, self.ttk.Label) and int(widget.grid_info().get("row", -1)) == row:
                     widget.configure(text=text)
                     return
-        copy(self.cards, len(self.location_buttons), tr("Wähle den Standort der Bridge. Gespeicherte Verbindungen werden beim App-Start wiederhergestellt."))
+        copy(self.cards, len(self.location_buttons), tr("Die Kopplung gilt für alle Dienste auf dieser Bridge.") if self.management else "")
         for widget in self.q2.winfo_children():
             if isinstance(widget, self.ttk.Checkbutton) and str(widget.cget("variable")) == str(self.q2_tunnel_open):
                 widget.grid_remove()
@@ -8144,7 +8333,7 @@ class ConnectionDialog:
         copy(self.q4, 1, tr("Vor „Koppeln und speichern“ den vollständigen Fingerprint mit der SPKI-Zeile im Ziel-Terminal vergleichen. Dein Klick bestätigt den Vergleich; spätere Zertifikatswechsel werden blockiert."))
         copy(self.qrexec_tunnel_page, 0, tr("Die Bridge ist gekoppelt. Jetzt mit OpenAI verbinden: Tunnel-ID und Runtime Key eingeben. Der Tunnel läuft im Ziel-Qube; die Werte werden über die geprüfte Verbindung dorthin übertragen."))
         copy(self.qrexec_tunnel_page, 4, tr("Der Runtime Key wird nur an der Bridge geschützt gespeichert und nach der Übertragung hier geleert. Den offiziellen Client richtet die Bridge unter Linux bei Bedarf ein. Der Status aktualisiert sich automatisch."))
-        copy(self.remote_setup, 0, tr("Bridge und Tunnel laufen auf einem anderen Rechner. Adresse und Pfade prüfen, dort den Startbefehl ausführen und anschließend die Verbindung testen."))
+        copy(self.remote_setup, 0, tr("Adresse und Pfade prüfen, den Startbefehl auf dem Bridge-Rechner ausführen und die Verbindung testen."))
         copy(self.remote_tunnel_page, 0, tr("Die Bridge ist gekoppelt. Die beiden Platform-Werte richten den Secure Tunnel am Bridge-Standort ein."))
         copy(self.local_inputs, 0, tr("In der OpenAI Platform: Tunnel-ID erstellen und einen Restricted Runtime API key mit Tunnels Read + Use anlegen. Verwende die Organisation und den Workspace des gewünschten Chats."))
         copy(self.chat_section, 0, tr("Diesen Chat-Code nur im gewünschten AI-Chat mitteilen. Er gilt 24 Stunden und erlaubt zusammen mit dem MCP-Zugriff den Abruf freigegebener Ausgaben."))
@@ -8178,15 +8367,22 @@ class ConnectionDialog:
     def open_recovery_setup(self):
         saved = self.core.saved_connection or {}
         mode = "QREXEC" if saved.get("qrexec") and self.qubes else "REMOTE" if saved.get("profile") else "LOCAL"
+        if not self.management:
+            mode = self.core.service_location("mcp")
         self.location.set(mode)
-        self.wizard_goto(1 if mode == "QREXEC" else 0)
+        self.wizard_goto(1 if self.management and mode == "QREXEC" else 0)
+        if self.management:
+            self.window.geometry(self.wizard_size)
 
     def retry_recovery(self):
         # Repaint before synchronous preparation/cleanup; a fast repeated error
         # remains distinguishable afterwards through the attempt number.
         self.recovery_notice.set(tr("Gespeicherte Verbindung wird erneut gestartet …"))
         self.window.update_idletasks()
-        self.core.retry_connection_recovery()
+        if not self.management and self.core.service_location("mcp") == "REMOTE":
+            self.core.select_mcp_location("REMOTE")
+        else:
+            self.core.retry_connection_recovery()
 
     def render_connection_layers(self, bridge):
         saved = self.core.saved_connection or {}
@@ -8231,6 +8427,15 @@ class ConnectionDialog:
         attempt_status = recovery_attempt_status(self.core)
         if attempt_status:
             notice = attempt_status + "\n" + notice
+        if self.management:
+            site, state = self.ui.core.external_bridge_status()
+            self.connection_path.set(tr("Externe Bridge") + (" · " + site if site else ""))
+            self.layer_labels["Bridge"].configure(text=state)
+            for key in ("Secure Tunnel", "Chat"):
+                self.layer_labels[key].grid_remove()
+            self.summary.set("")
+            if connected:
+                notice = tr("Die Kopplung gilt für alle Dienste auf dieser Bridge.")
         self.recovery_notice.set(notice)
         # Secondary controls appear only where they have a useful effect.
         for key, visible in (("qrexec_stop", self.core.qrexec_forwarder.running),
@@ -8247,8 +8452,13 @@ class ConnectionDialog:
         for variable in (*self.fields.values(), self.location, self.compared, self.details):
             for mode, command in variable.trace_info():
                 variable.trace_remove(mode, command)
+        if self.ui.bridge_dialog is self:
+            self.ui.bridge_dialog = None
+            self.ui.bridge_return_to = None
         if self.ui.connection_dialog is self:
             self.ui.connection_dialog = None
+            if self.ui.bridge_return_to == "mcp":
+                self.ui.bridge_return_to = None
 
     def section(self, row, title):
         frame = self.ttk.LabelFrame(self.content, text=title, padding=12)
@@ -8432,23 +8642,26 @@ class ConnectionDialog:
         return self.core.pair_thread is not None and self.core.pair_thread.is_alive()
 
     WIZARD_TITLES = {
-        "LOCAL": (tr("Lokale Bridge und Tunnel"), tr("Chat binden und verwalten")),
-        "QREXEC": (tr("Ziel-Qube"), tr("Bridge starten und verbinden"), tr("Bewusst koppeln"),
-                   tr("Tunnel am Ziel-Qube verbinden"), tr("Chat binden und verwalten")),
-        "REMOTE": (tr("Bridge-Standort und Startbefehl"), tr("Prüfen, Code anfordern und koppeln"),
-                   tr("Tunnel am Gateway verbinden"), tr("Chat binden und verwalten")),
+        "LOCAL": ("Lokale Bridge und Tunnel", "Chat binden und verwalten"),
+        "QREXEC": ("Ziel-Qube", "Bridge starten und verbinden", "Bewusst koppeln",
+                   "Tunnel am Ziel-Qube verbinden", "Chat binden und verwalten"),
+        "REMOTE": ("Bridge-Standort und Startbefehl", "Prüfen, Code anfordern und koppeln",
+                   "Tunnel am Gateway verbinden", "Chat binden und verwalten"),
     }
     QREXEC_IDLE_TEXT = (tr("Noch nicht geprüft. Starte die Bridge im Ziel-Qube und klicke anschließend auf Verbindung prüfen."))
 
     def wizard_titles(self, mode):
-        return self.WIZARD_TITLES.get(mode, ())
+        titles = tuple(tr(title) for title in self.WIZARD_TITLES.get(mode, ()))
+        if mode in ("QREXEC", "REMOTE"):
+            return titles[:-2] if self.management else titles[-2:]
+        return titles
 
     def wizard_pages(self, mode=None):
         mode = mode or self.location.get()
         if mode == "QREXEC":
-            return self.qrexec_panel, [self.q1, self.q2, self.q4, self.qrexec_tunnel_page]
+            return self.qrexec_panel, [self.q1, self.q2, self.q4] if self.management else [self.qrexec_tunnel_page]
         if mode == "REMOTE":
-            return self.remote, [self.remote_setup, self.remote_pair, self.remote_tunnel_page]
+            return self.remote, [self.remote_setup, self.remote_pair] if self.management else [self.remote_tunnel_page]
         if mode == "LOCAL":
             return self.local, [self.local]
         return self.cards, [self.cards]
@@ -8458,24 +8671,42 @@ class ConnectionDialog:
         # Geschwister-Abschnitte (Tunnel-Umgebung, Chat/Verwalten) gehören zu
         # konkreten Schritten – keine dauerhaft angehängten Blöcke.
         mode = self.location.get()
-        for frame in (self.cards, self.local, self.remote, self.qrexec_panel):
+        for frame in (self.cards, self.local, self.remote, self.qrexec_panel, self.remote_required,
+                      self.q1, self.q2, self.q4, self.qrexec_tunnel_page,
+                      self.remote_setup, self.remote_pair, self.remote_tunnel_page):
             frame.grid_remove()
         for section in (self.bridge_section, self.tunnel_section, self.chat_section,
                         self.controls, self.details_button):
             section.grid_remove()
         self.local_tunnel.grid() if mode == "LOCAL" else self.local_tunnel.grid_remove()
         if self.recovery_overview:
-            self.intro.configure(text=tr("Gespeicherte Einrichtung weiterverwenden. Eine neue Kopplung ist normalerweise nicht nötig."))
+            self.intro.configure(text=tr("Die Kopplung gilt für alle Dienste auf dieser Bridge.") if self.management
+                                 else tr("Gespeicherte Einrichtung weiterverwenden. Eine neue Kopplung ist normalerweise nicht nötig."))
             self.wizard_step.set(tr("Gespeicherte Verbindung"))
             self.buttons["wizard_next"].grid_remove()
+            if self.management:
+                self.intro.grid_remove()
+                self.navigation.grid_remove()
+                self.window.geometry("700x340")
             return
+        self.intro.grid()
+        self.navigation.grid()
         if mode == "CARD":
             self.bridge_section.grid()
             self.cards.grid(row=0, column=0, sticky="ew")
-            self.buttons["wizard_next"].grid()
-            self.bridge_section.configure(text=tr("Wo soll die Bridge laufen?"))
+            self.buttons["wizard_next"].grid_remove()
+            self.bridge_section.configure(text=tr("Verbindungsweg auswählen") if self.management
+                                          else tr("Wo soll der Secure MCP Tunnel laufen?"))
             self.wizard_step.set(tr("Standort auswählen"))
             self.refresh_qubes_diagnostics()
+            return
+        if not self.management and mode in ("REMOTE", "QREXEC") and not self.core.saved_remote().get("profile"):
+            self.bridge_section.configure(text=tr("Externe Bridge"))
+            self.bridge_section.grid()
+            self.remote_required.grid(row=0, column=0, sticky="ew")
+            self.buttons["wizard_next"].grid_remove()
+            self.wizard_step.set(tr("Standort auswählen"))
+            self.intro.configure(text="")
             return
         titles = self.wizard_titles(mode)
         if titles:
@@ -8488,11 +8719,13 @@ class ConnectionDialog:
                         "QREXEC": tr("Ziel-Qube festlegen; anschließend Bridge starten und die Verbindung prüfen."),
                         "REMOTE": tr("Bridge am gewählten Standort starten und die Verbindung prüfen.")}
         self.intro.configure(text=instructions.get(mode, tr("Verbindung einrichten.")))
-        if index == len(titles)-1:
+        if self.management:
+            self.intro.configure(text=tr("Die Kopplung gilt für alle Dienste auf dieser Bridge."))
+        elif index == len(titles)-1:
             self.intro.configure(text=tr("Letzter Schritt: den gewünschten Chat bewusst mit dieser Verbindung binden."))
         elif index == len(titles)-2 and mode != "LOCAL":
             self.intro.configure(text=tr("Secure Tunnel am Bridge-Standort mit OpenAI verbinden."))
-        if mode in ("LOCAL", "QREXEC", "REMOTE") and index == len(titles) - 1:
+        if not self.management and mode in ("LOCAL", "QREXEC", "REMOTE") and index == len(titles) - 1:
             if mode == "LOCAL":
                 # Der lokale Tunnel-Status/Diagnoseblock gehört zur letzten Seite.
                 self.tunnel_section.configure(text="2 · OpenAI Secure MCP Tunnel")
@@ -8547,6 +8780,8 @@ class ConnectionDialog:
 
     def wizard_can_advance(self):
         mode, index = self.location.get(), self.wizard_index
+        if not self.management and mode in ("REMOTE", "QREXEC"):
+            return index == 0 and self.core.bridge_state == "CONNECTED" and (self.core.remote_tunnel or {}).get("phase") == "connected"
         if mode == "QREXEC":
             return (index == 0 or index == 1 and self.qrexec_verified
                     or index == 2 and self.core.bridge_state == "CONNECTED"
@@ -8563,7 +8798,7 @@ class ConnectionDialog:
         titles = self.wizard_titles(mode)
         if not self.wizard_can_advance():
             return
-        if mode == "QREXEC" and self.wizard_index == 0:
+        if self.management and mode == "QREXEC" and self.wizard_index == 0:
             try:
                 validate_qube_name(self.fields["qrexec_target"].get())
                 self.qrexec_port()
@@ -8622,8 +8857,16 @@ class ConnectionDialog:
             box.frame.grid() if opened.get() else box.frame.grid_remove()
             box.show(((text, "plain"),))
 
+    def choose_location(self):
+        mode = self.location.get()
+        if not self.management and (mode == "LOCAL" or self.core.saved_remote().get("profile")):
+            self.run("bridge", lambda: self.core.select_mcp_location("LOCAL" if mode == "LOCAL" else "REMOTE"))
+        self.select_location()
+
     def select_location(self, *_):
         location = self.location.get()
+        if not self.management and location not in ("REMOTE", "QREXEC") and self.ui.bridge_return_to == "mcp":
+            self.ui.bridge_return_to = None
         if location != getattr(self, "wizard_mode", None):
             self.wizard_index = 0
             self.wizard_mode = location
@@ -8631,7 +8874,7 @@ class ConnectionDialog:
         card = location == "CARD"
         if not local:
             self.errors["tunnel"].set("")
-        self.intro.configure(text=tr("Bridge verbinden, Secure Tunnel einrichten, Chat bewusst binden.") if card else
+        self.intro.configure(text="" if card else
                              tr("Bridge und Secure Tunnel werden auf diesem System eingerichtet.") if local else
                              tr("Bridge am gewählten Standort einrichten. Die Fortschrittsanzeige zeigt, was bereits verbunden ist."))
         self.wizard_apply()
@@ -8755,7 +8998,19 @@ class ConnectionDialog:
         wechselt automatisch auf die Code-Seite; already_paired und alle Fehler
         bleiben mit Diagnose auf diesem Schritt (Retry ueber denselben Button).
         Kein Hintergrund-Hallo, kein extra Pflicht-Button."""
-        result = self.core.verify_qrexec_connection(self.fields["qrexec_target"].get(), self.qrexec_port())
+        target = validate_qube_name(self.fields["qrexec_target"].get())
+        port = self.qrexec_port()
+        forwarder = self.core.qrexec_forwarder
+        if forwarder.running and (forwarder.target, forwarder.remote_port) != (target, port):
+            # Stop users of the old loopback listener before pointing it at another Qube.
+            main = self.ui.core
+            if main.use_remote_mcp:
+                main.disconnect_bridge()
+                main.remote_mcp_binding = None
+            if main._guard_owner() is self.core:
+                main._drop_guard_client()
+            self.core.disconnect_bridge()
+        result = self.core.verify_qrexec_connection(target, port)
         phase = result["phase"]
         if not result["reachable"]:
             self.qrexec_verified = False
@@ -8885,7 +9140,8 @@ class ConnectionDialog:
                                tr("angezeigter SPKI wird als Profil-Pin fest gebunden; Code nicht protokolliert "
                                "(menschlicher Vergleich: Anzeige gegen Bridge-Konsole, Klick = Bestätigung)"),
                                tr("Nach erfolgreicher Kopplung ist die Bridge verbunden"))
-        self.core.begin_pair_remote(url, self.qrexec_observed_pin, code)
+        self.prepare_pairing()
+        self.core.begin_pair_remote(url, self.qrexec_observed_pin, code, via_qrexec=True)
         self.fields["qrexec_code"].set("")
         self.refresh_qubes_diagnostics()
 
@@ -8926,8 +9182,6 @@ class ConnectionDialog:
         Statusvalidierung). Ohne passende eigene Credentials bleibt es ein
         ehrlicher Status ohne Fortschritt – niemals ein Auth-Bypass und keine
         automatische Neukopplung."""
-        if self.core.bridge_state == "CONNECTED":
-            return tr("Die gespeicherte Bridge ist bereits authentifiziert verbunden.")
         if (self.core.bridge_state in {"CONNECTING", "PAIRING", "RETRYING"}
                 or self.core.recovery_preparation is not None or self.core.recovery_state == "WAITING"):
             return (tr("Die Bridge-Verbindung wird bereits aufgebaut; Ergebnis abwarten. "
@@ -8944,6 +9198,8 @@ class ConnectionDialog:
             return (tr("Die Bridge meldet eine bestehende Kopplung, aber auf diesem Rechner ist keine passende "
                     "gespeicherte Controller-Verbindung. Ohne eigene Credentials wird nichts übernommen – "
                     "bewusst neu koppeln (ersetzt die aktive Freigabe) ist der einzige Weg."))
+        if self.core.bridge_state == "CONNECTED":
+            return tr("Die gespeicherte Bridge ist bereits authentifiziert verbunden.")
         # Active states suppress duplicate clicks. A failed asynchronous attempt
         # must not leave a permanent per-dialog lock on this saved recipient.
         try:
@@ -8955,13 +9211,22 @@ class ConnectionDialog:
         return (tr("Bereits gekoppelt – die gespeicherte, gepinnte Controller-Verbindung wird wiederhergestellt "
                 "und echt authentifiziert; bei Erfolg führt der Assistent automatisch weiter."))
 
+    def prepare_pairing(self):
+        main = self.ui.core
+        if "mcp" not in main.locations:
+            main.set_service_location("mcp", main.service_location("mcp"))
+        previous = main.service_location("sh-guard")
+        if previous and "sh-guard" not in main.locations:
+            main.set_service_location("sh-guard", previous)
+
     def pair(self):
         # #90: remote branch likewise binds the displayed, human-compared SPKI;
         # the deliberate check action proved reachability and requested the code.
         require(self.remote_observed_pin, "bridge_not_verified")
         code = self.normalize_pair_code(self.fields["code"].get())
         require(re.fullmatch(r"[0-9A-HJKMNP-TV-Z]{8}", code), "pair_code_invalid")
-        self.core.begin_pair_remote(self.fields["url"].get().rstrip("/"), self.remote_observed_pin, code)
+        self.prepare_pairing()
+        self.core.begin_pair_remote(self.fields["url"].get().rstrip("/"), self.remote_observed_pin, code, via_qrexec=False)
         self.fields["code"].set("")
 
 
@@ -8995,7 +9260,10 @@ class ConnectionDialog:
         self.last_state = bridge.state
         local = self.location.get() == "LOCAL"
         ready = local and self.core.local_setup_state == "CONNECTED" and bridge.state == "CONNECTED" and bridge.tunnel_state == "READY"
-        if self.recovery_overview and bridge.state == "CONNECTED":
+        if bridge.state == "CONNECTED" and self.management and previous_state in ("PAIRING", "CONNECTING", "RETRYING"):
+            self.recovery_overview = True
+            self.wizard_apply()
+        elif self.recovery_overview and bridge.state == "CONNECTED" and not self.management:
             self.recovery_overview = False
             self.wizard_apply()
         self.summary.set(local_setup_summary(self.core) if local else connection_summary(bridge))
@@ -9018,7 +9286,7 @@ class ConnectionDialog:
         self.buttons["chat_copy"].grid() if visible else self.buttons["chat_copy"].grid_remove()
         self.buttons["chat_show"].grid_remove() if visible else self.buttons["chat_show"].grid()
         self.buttons["chat_rotate"].grid() if self.details.get() else self.buttons["chat_rotate"].grid_remove()
-        on_chat = self.location.get() != "CARD" and \
+        on_chat = not self.management and self.location.get() != "CARD" and \
             self.wizard_index == len(self.wizard_titles(self.location.get())) - 1
         if on_chat and not visible and bridge.state == "CONNECTED" and bridge.chat_binding is not None:
             # S5: entering the chat step shows the current code automatically ONCE
@@ -9041,7 +9309,7 @@ class ConnectionDialog:
         for key in ("remote_tunnel_id", "remote_runtime_key", "qrexec_tunnel_id", "qrexec_runtime_key"):
             self.entries[key].configure(state="disabled" if busy else "normal")
         location = self.location.get()
-        if location in ("REMOTE", "QREXEC"):
+        if not self.management and location in ("REMOTE", "QREXEC") and bridge.mode != "LOCAL":
             if bridge.state == "CONNECTED" and self.core.remote_tunnel is None \
                     and self.core.remote_tunnel_probe is None and not self.core.remote_tunnel_busy \
                     and self.probe_suppressed != bridge.instance:
@@ -9051,12 +9319,8 @@ class ConnectionDialog:
                     pass
             phase, detail = bridge.tunnel_phase, bridge.tunnel_detail or ""
             if bridge.state != "CONNECTED":
-                # 0.9.3: der Widerspruch „bereits gekoppelt“ vs. Gate ist aufgelöst –
-                # der Text benennt den echten Grund und den zulässigen Weg.
-                self.remote_tunnel_status.set(
-                    tr("Bridge ist nicht authentifiziert verbunden. „Verbindung prüfen“ stellt eine passende "
-                    "bereits gekoppelte, gepinnte Controller-Verbindung automatisch und echt authentifiziert "
-                    "wieder her; erst danach kann der Tunnel übertragen und beobachtet werden."))
+                self.remote_tunnel_status.set(tr("Verbindung zur externen Bridge wird aufgebaut.")
+                    if bridge.state == "CONNECTING" else tr("Externe Bridge offline. Die Verbindung lässt sich unten links im Hauptfenster verwalten."))
             elif self.probe_suppressed == bridge.instance and self.core.remote_tunnel is None:
                 pass  # the deliberate cancel notice stays visible until a new save/reconnect
             else:
@@ -9077,7 +9341,7 @@ class ConnectionDialog:
                          "connected": tr("Tunnel verbunden · Chat-Seite ist der nächste Schritt."),
                          "error": tr("Tunnel-Fehler: ") + self.error_text(detail)}.get(phase or "",
                                                                             tr("Tunnelstatus wird abgefragt …")))
-            form_needed = bridge.state != "CONNECTED" or phase in (None, "missing", "error")
+            form_needed = bridge.state == "CONNECTED" and phase in (None, "missing", "error")
             for form in (self.remote_tunnel_form, self.qrexec_tunnel_form):
                 form.grid() if form_needed else form.grid_remove()
             if self.was_tunnel_busy and not self.core.remote_tunnel_busy:
@@ -9517,7 +9781,9 @@ class ReviewUI:
         self.risk_render_key = None
         self.risk_settings_open = False
         self.text_settings_open = False
-        self.guard_window = None
+        self.bridge_dialog = None
+        self.bridge_return_to = None
+        self.guard_pending_remote = False
         self.payload_details = None
         self.status_labels = []
         root.title("Admin in the Loop · v" + BRIDGE_SERVER_INFO["version"])
@@ -9538,13 +9804,17 @@ class ReviewUI:
         self.layout.grid(row=0, column=0, sticky="nsew")
         self.layout.rowconfigure(0, weight=1)
         language_bar = ttk.Frame(root)
-        language_bar.grid(row=1, column=0, sticky="e", padx=16, pady=(0, 6))
-        ttk.Label(language_bar, text=tr("Sprache / Language")).pack(side="left", padx=6)
+        language_bar.grid(row=1, column=0, sticky="ew", padx=16, pady=(0, 6))
+        self.bridge_button = ttk.Button(language_bar, command=self.open_bridge_management)
+        self.bridge_button.pack(side="left")
+        self.bridge_footer_status = tk.StringVar(master=root)
+        ttk.Label(language_bar, textvariable=self.bridge_footer_status).pack(side="left", padx=8)
         self.language_options = {"system": tr("Systemstandard"), "de": "Deutsch", "en": "English"}
         self.language = tk.StringVar(value=self.language_options[self.language_choice])
         self.language_picker = ttk.Combobox(language_bar, textvariable=self.language,
             values=tuple(self.language_options.values()), state="readonly", width=18)
-        self.language_picker.pack(side="left")
+        self.language_picker.pack(side="right")
+        ttk.Label(language_bar, text=tr("Sprache / Language")).pack(side="right", padx=6)
         self.language_picker.bind("<<ComboboxSelected>>", self.change_language)
         rgb = tuple(value // 256 for value in root.winfo_rgb(base))
         shift = -1 if sum(rgb) > 384 else 1
@@ -9682,7 +9952,7 @@ class ReviewUI:
 
         self.ai_status = tk.StringVar(value=tr("Nicht verbunden\nLokaler Testmodus"))
         self.header(right, "AI / MCP", self.ai_status,
-                    tr("Verbindung einstellen"), self.connection_settings, "ai")
+                    tr("Einrichtung & Einstellungen"), self.connection_settings, "ai")
         right_space = ttk.Frame(right)
         right_space.grid(row=1, column=0, sticky="nsew")
         ttk.Label(right_space, text=tr("Command-Blockgröße"), anchor="center", justify="center").pack(
@@ -9878,16 +10148,17 @@ class ReviewUI:
             self.risk_settings_open = False
         self.command_risk_action(self.risk_enabled.get())
         if self.core.risk_requested and self.core.risk_setup_state != "READY":
-            self.risk_settings_open = True
-            self.render()
-            self.review_notebook.select(self.risk_summary_tab)
-            self.risk_views.select(self.risk_settings_page)
+            self._select_guard_settings()
 
     def _invoke_risk_control(self, widget):
         widget.invoke()
         return "break"
 
     def command_risk_action(self, enabled=True):
+        if enabled and self.core.service_location("sh-guard") is None:
+            self.risk_enabled.set(False)
+            self.show_review_settings("sh-guard")
+            return
         host, location = self.core.guard_location()
         if enabled and host != "local" and self.core.guard_consent != host:
             if not self.messagebox.askyesno("sh-guard · " + location,
@@ -9897,31 +10168,84 @@ class ReviewUI:
                 return
         self.action(lambda: self.core.request_command_risk(enabled))
 
-    def open_guard_window(self):
-        if self.guard_window is not None and self.guard_window.winfo_exists():
-            self.guard_window.lift()
+    def open_bridge_management(self, return_to=None):
+        self.bridge_return_to = return_to
+        if self.bridge_dialog is not None and self.bridge_dialog.window.winfo_exists():
+            self.bridge_dialog.window.lift()
+        else:
+            self.bridge_dialog = self.action(lambda: ConnectionDialog(self, management=True))
+        return self.bridge_dialog
+
+    def _render_bridge_footer(self):
+        site, state = self.core.external_bridge_status()
+        self.bridge_button.configure(text=tr("Bridge-Verwaltung öffnen") if site else tr("Externe Bridge einrichten"))
+        self.bridge_footer_status.set(f"{site} · {state}" if site else "")
+        dialog = self.bridge_dialog
+        if dialog is None:
             return
-        def show_services(page):
-            self.core.guard_inspected = True
-            return self._build_guard_panel(page)
-        self.guard_window = show_bridge_management(
-            self.root, lambda: self.core.guard_location()[1], self.core.guard_connection_state,
-            show_services, english=UI_LANGUAGE == "en", configure_connection=self.connection_settings)
+        dialog.render()
+        source = self.bridge_return_to
+        if source and site and dialog.core.paired_remote_binding():
+            self.bridge_return_to = None
+            dialog.window.destroy()
+            if source == "sh-guard":
+                self.choose_guard_location("REMOTE")
+                self.show_review_settings("sh-guard")
+            elif self.connection_dialog:
+                self.connection_dialog.window.lift()
+                self.connection_dialog.choose_location()
+
+    def choose_guard_location(self, location):
+        if self.bridge_return_to == "sh-guard":
+            self.bridge_return_to = None
+        self.guard_pending_remote = location == "REMOTE" and not self.core.saved_remote().get("profile")
+        if not self.guard_pending_remote:
+            if location == "REMOTE":
+                remote = self.core.remote_connection()
+                if remote.bridge_state == "DISCONNECTED":
+                    remote.begin_connection_recovery()
+            self.core.set_service_location("sh-guard", location)
+        self._show_guard_location()
+        self.render()
+
+    def _show_guard_location(self):
+        location = self.core.service_location("sh-guard")
+        pending = self.guard_pending_remote
+        self.guard_location_var.set("REMOTE" if pending else location or "")
+        self.core.guard_inspected = bool(location and not pending)
+        if self.core.guard_inspected:
+            self.guard_panel.pack(fill="both", expand=True)
+            self.guard_panel.refresh()
+        else:
+            self.guard_panel.pack_forget()
+        if pending:
+            self.guard_setup_prompt.pack(fill="x")
+        else:
+            self.guard_setup_prompt.pack_forget()
+
+    def cancel_guard_location(self):
+        if self.bridge_return_to == "sh-guard":
+            self.bridge_return_to = None
+        self.guard_pending_remote = False
+        self._show_guard_location()
 
     def _build_guard_panel(self, parent):
         return build_guard_settings(parent, lambda: self.core.guard_location()[1],
-                                    self.core.guard_status, self.core.guard_action, english=UI_LANGUAGE == "en")
+                                    self.core.guard_status, self.core.guard_action, english=UI_LANGUAGE == "en",
+                                    compact=True)
+
+    def _select_guard_settings(self):
+        self._show_guard_location()
+        self.risk_settings_open = True
+        self.render()
+        self.review_notebook.select(self.risk_summary_tab)
+        self.risk_views.select(self.risk_settings_page)
 
     def show_review_settings(self, service, direction=None):
         self.close_review_selector()
         if service == "sh-guard":
-            self.core.guard_inspected = True
-            self.guard_panel.refresh()
-            self.risk_settings_open = True
-            self.render()
-            self.review_notebook.select(self.risk_summary_tab)
-            self.risk_views.select(self.risk_settings_page)
-            self.guard_panel.disclosure.focus_set()
+            self._select_guard_settings()
+            (self.guard_panel.disclosure if self.core.guard_inspected else self.guard_location_buttons["LOCAL"]).focus_set()
         else:
             self.text_settings_direction = direction or self.review_selector_direction
             self.text_settings_open = True
@@ -9932,6 +10256,7 @@ class ReviewUI:
 
     def close_review_settings(self, service):
         if service == "sh-guard":
+            self.cancel_guard_location()
             self.risk_settings_open = False
         else:
             self.text_settings_open = False
@@ -9941,10 +10266,26 @@ class ReviewUI:
     def _build_service_settings(self):
         self.risk_settings_page = self.ttk.Frame(self.risk_views)
         self.risk_views.add(self.risk_settings_page, text=tr("Einrichtung & Einstellungen"))
-        self.guard_panel = self._build_guard_panel(self.risk_settings_page)
+        selector = self.ttk.Frame(self.risk_settings_page, padding=(8, 2))
+        selector.pack(fill="x")
+        self.ttk.Label(selector, text=tr("Wo soll sh-guard laufen?"), font="TkHeadingFont").grid(
+            row=0, column=0, columnspan=2, sticky="w")
+        self.guard_location_var = self.tk.StringVar(master=self.root)
+        self.guard_location_buttons = {}
+        for mode, label in (("LOCAL", tr("Auf diesem Rechner")), ("REMOTE", tr("Über die externe Bridge"))):
+            button = self.ttk.Radiobutton(selector, text=label, value=mode, variable=self.guard_location_var,
+                command=lambda choice=mode: self.action(lambda: self.choose_guard_location(choice)))
+            button.grid(row=1, column=len(self.guard_location_buttons), sticky="w", padx=(0, 8))
+            self.guard_location_buttons[mode] = button
+        self.guard_setup_prompt = self.ttk.Frame(self.risk_settings_page, padding=(12, 0))
+        self.ttk.Label(self.guard_setup_prompt, text=tr("Zuerst die externe Bridge koppeln.")).pack(anchor="w")
+        self.ttk.Button(self.guard_setup_prompt, text=tr("Externe Bridge einrichten"),
+                        command=lambda: self.open_bridge_management("sh-guard")).pack(side="left")
+        self.ttk.Button(self.guard_setup_prompt, text=tr("Zurück"), command=self.cancel_guard_location).pack(side="left")
         footer = self.ttk.Frame(self.risk_settings_page)
-        footer.pack(fill="x")
-        self.ttk.Button(footer, text=tr("Bridge-Verwaltung öffnen"), command=self.open_guard_window).pack(side="left")
+        footer.pack(side="bottom", fill="x")
+        self.guard_panel = self._build_guard_panel(self.risk_settings_page)
+        self.guard_panel.pack_forget()
         self.ttk.Button(footer, text=tr("Schließen"),
                         command=lambda: self.close_review_settings("sh-guard")).pack(side="right")
 
@@ -10075,7 +10416,7 @@ class ReviewUI:
                 tooth = min(dx,dy) <= 1.5 or abs(dx-dy) <= 1
                 if 10 <= radius <= 30 or (30 < radius <= 59 and tooth):
                     self.review_settings_icon.put(foreground, (x,y))
-        for button in (self.risk_settings_button, self.text_settings_button):
+        for button in (self.risk_settings_button, self.text_settings_button, self.bridge_button):
             button.configure(image=self.review_settings_icon, compound="left")
         self.review_arrow = self.tk.PhotoImage(master=self.root, width=9, height=6)
         for row in range(4):
@@ -10308,7 +10649,10 @@ class ReviewUI:
             self.review_notebook.select(self.code_tab)
             self.review_tab_identity = identity
         self.risk_enabled.set(self.core.risk_requested or self.core._command_risk.enabled)
-        self.risk_checkbox.configure(state="normal", text=tr("sh-guard: statische Shellanalyse") + " · " + self.core.guard_location()[1])
+        caption = tr("sh-guard: statische Shellanalyse")
+        if self.core.service_location("sh-guard"):
+            caption += " · " + self.core.guard_location()[1]
+        self.risk_checkbox.configure(state="normal", text=caption)
         labels = {"DISABLED": tr("Analyse ausgeschaltet"), "IDLE": tr("Bereit für den nächsten Command") if not snapshot.review else tr("Nur für AI → Terminal"),
                   "CHECKING_TOOL": tr("sh-guard wird geprüft"), "INSTALL_CONFIRM": tr("Installation bestätigen"),
                   "INSTALLING": tr("sh-guard wird installiert"), "SCANNING": tr("Prüfung läuft"),
@@ -10768,6 +11112,7 @@ class ReviewUI:
         self.approve()
 
     def render(self):
+        self._render_bridge_footer()
         snapshot = self.core.snapshot()
         self.terminal_status.set({"CONNECTED": tr("Terminal verbunden\nBash · lokale Sitzung\nApp schließen beendet diese Shell nicht"),
                                   "WAITING_FOR_TERMINAL": tr("Nicht verbunden\nTerminal kann geöffnet werden"),
@@ -10943,7 +11288,7 @@ def run_gui():
         root = tk.Tk()
         core.start_local(os.getcwd())
         ReviewUI(root, core)
-        root.after_idle(core.begin_connection_recovery)
+        root.after_idle(core.restore_services)
         root.mainloop()
     finally:
         core.close()
@@ -11491,7 +11836,7 @@ BRIDGE_RETENTION = 24 * 3600
 BRIDGE_OUTPUT_LIMIT = 64 * 1024
 BRIDGE_BLOCK_SIZES = ("SINGLE", "SMALL", "MEDIUM", "LARGE")
 BRIDGE_VERSIONS = ("2026-07-28", "2025-11-25", "2025-06-18", "2025-03-26")
-BRIDGE_SERVER_INFO = {"name": "admin-in-the-loop", "version": "0.9.32"}
+BRIDGE_SERVER_INFO = {"name": "admin-in-the-loop", "version": "0.9.33"}
 BRIDGE_BASE32 = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 # M9 Folgeaenderung (Operator-Journal 100): pairing-code validity 10 minutes; the
 # attempt limit (5), claim-path cooldown and the separate PAIR_PENDING token lifetime

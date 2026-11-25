@@ -4,12 +4,12 @@ Ab **0.9.31** führt die Bridge die Befehlsanalyse aus. Aktualisiere für diese
 Funktion Hauptprogramm und Bridge. Bei einer älteren Bridge meldet die
 Dienstverwaltung `risk_bridge_update_required`.
 
-1. Öffne **Befehlsprüfung → sh-guard → Einstellungen**. Prüfe den Standort im
-   Titel und auf dem Installationsbutton. Über **Bridge-Verwaltung öffnen →
-   Allgemein → Verbindung einstellen** wählst
-   du bei Bedarf einen anderen Standort. Eine vorhandene Remote-Kopplung
-   liefert den Zugang. Für rein lokalen Betrieb startet AITL bei Bedarf einen
-   privaten Bridge-Prozess. Ein OpenAI-Tunnel wird dafür nicht benötigt.
+1. Öffne **Befehlsprüfung → sh-guard → Einstellungen**. Wähle **Auf diesem Rechner**
+   oder **Über die externe Bridge**. Für die zweite Option verwendet AITL die
+   vorhandene Kopplung. Beim ersten Mal führt **Externe Bridge einrichten**
+   zur Kopplung und anschließend zurück zu sh-guard. Das Installationsziel
+   steht im Titel und auf der Schaltfläche. Auf diesem Rechner startet AITL
+   bei Bedarf einen privaten Bridge-Prozess.
 2. **Installieren** lädt das für den Bridge-Rechner gepinnte Archiv dort
    herunter. Unter **Technische Details anzeigen** stehen Installationspfad,
    Downloadquelle und Archivprüfsumme. Die Bridge prüft die SHA-256-Werte von
@@ -22,15 +22,16 @@ Dienstverwaltung `risk_bridge_update_required`.
    Der persönliche Qube sendet diesen Text vor der Terminalfreigabe zur
    gekoppelten Bridge. Der Befund gehört zur Textrevision, zum exakten Inhalt
    und zur Dienstinstanz. Über die Übergabe ans Terminal entscheidet der Admin.
-4. **Bridge-Verwaltung öffnen** zeigt die Verwaltung als Unterfenster.
-   Im grafischen Ziel-Qube öffnet `python3 admin_in_the_loop.py --bridge --gui`
-   die Verwaltung direkt. Beide Fenster starten im Reiter **Allgemein**.
-   Er zeigt den Standort und auf der Bridge den Kopplungsstatus, im Hauptprogramm
-   den Verbindungsstatus. Auf der Bridge erzeugt **Hauptprogramm koppeln**
-   einen Einmalcode und zeigt den Zertifikatsfingerabdruck an. Gib den Code
-   beim Koppeln im Hauptprogramm ein. Eine bestehende Kopplung gilt für alle
-   Dienste dieser Bridge. Der Reiter **Dienste** enthält die sh-guard-Verwaltung.
-   Das Zahnrad in der Befehlsprüfung öffnet die sh-guard-Einstellungen direkt.
+4. Unten links im Hauptfenster öffnet das Zahnrad **Externe Bridge einrichten**
+   oder **Bridge-Verwaltung öffnen**. Hier stehen Standort, Verbindungsstatus
+   und Kopplung. In **AI / MCP → Einrichtung & Einstellungen** wählst du
+   unabhängig davon den Standort des Secure MCP Tunnels und verwaltest den
+   Chat-Code. Ein lokaler Tunnel und eine externe sh-guard-Installation können
+   gleichzeitig laufen, ebenso die umgekehrte Kombination.
+5. Im grafischen Ziel-Qube öffnet `python3 admin_in_the_loop.py --bridge --gui`
+   die Verwaltung direkt. **Allgemein → Hauptprogramm koppeln** zeigt einen
+   Einmalcode und den Zertifikatsfingerabdruck. Vergleiche den Fingerabdruck
+   und gib den Code im Hauptprogramm ein. **Dienste** verwaltet sh-guard vor Ort.
    Verwende bei einem abweichenden Zustandsverzeichnis
    denselben Wert für `--state-dir` wie beim Dienststart. Bei einer laufenden
    Bridge fordert der Befehl das Fenster in deren grafischer Sitzung an.
@@ -44,6 +45,18 @@ Qrexec-Weiterleitung oder HTTPS-Kopplung trägt alle Aufrufe. Der MCP-Zugang des
 Chats ist von diesen Endpunkten getrennt. Analysetexte und Befunde werden im
 Arbeitsspeicher verarbeitet. Bei Ausfall einer gewählten Remote-Bridge zeigt
 der Controller die fehlende Prüfung an.
+
+### Vorschau im Hauptprogramm
+
+Im Test verbindet sich das Hauptprogramm über HTTPS mit einem zweiten Prozess
+auf demselben Rechner. Daher zeigt die Fußzeile eine Loopback-Adresse. Bei
+einer Qrexec-Verbindung steht dort der gewählte Qube-Name.
+
+| Erste Standortwahl | sh-guard auf der gekoppelten Bridge |
+| --- | --- |
+| ![Standortwahl und Einstieg in die Erstkopplung](assets/bridge-services/hauptfenster-einrichtung.png) | ![Einstellungen für sh-guard und Status der externen Bridge](assets/bridge-services/hauptfenster-gekoppelt.png) |
+
+![Verwaltung der gemeinsamen Verbindung über das Zahnrad unten links](assets/bridge-services/externe-bridge.png)
 
 ### Vorschau auf der Bridge
 

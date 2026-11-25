@@ -345,40 +345,35 @@ class CommandRiskUXTests(unittest.TestCase):
             stale.assert_called_once()
         self.assertFalse(self.core.risk_requested)
 
-    def test_services_subwindow_reuses_location_and_controls_without_enabling_review(self):
-        with mock.patch.object(self.ui, "connection_settings") as configure:
-            self.ui.open_guard_window()
-        window = self.ui.guard_window
+    def test_global_bridge_entry_and_first_service_location_are_independent(self):
+        self.core.guard_consent = None
+        self.ui.bridge_button.invoke()
+        dialog = self.ui.bridge_dialog
         self.root.update()
-        self.assertTrue(window.winfo_viewable())
-        self.assertEqual(str(window.transient()), str(self.root))
-        self.assertEqual(window.title(), "Bridge-Verwaltung")
-        tabs = window.children["tabs"]
-        general, services = tabs.children["general"], tabs.children["services"]
-        self.assertEqual([tabs.tab(page, "text") for page in tabs.tabs()], ["Allgemein", "Dienste"])
-        self.assertEqual(tabs.select(), str(general))
-        self.assertFalse(services.winfo_children())
+        self.assertEqual(self.ui.bridge_button.cget("text"), "Externe Bridge einrichten")
+        self.assertEqual(dialog.window.title(), "Externe Bridge · Allgemein")
+        self.assertFalse(dialog.tunnel_section.winfo_viewable())
+        self.assertFalse(dialog.chat_section.winfo_viewable())
         self.assertFalse(self.core.guard_inspected)
-        connection, = [w for w in general.winfo_children() if w.winfo_class() == "TButton"]
-        self.assertEqual(connection.cget("text"), "Verbindung einstellen")
-        connection.invoke()
-        configure.assert_called_once_with()
-        tabs.select(services)
+        self.assertIs(self.ui.open_bridge_management(), dialog)
+        dialog.window.destroy()
+
+        self.ui.show_review_settings("sh-guard")
         self.root.update()
-        panel, = services.winfo_children()
-        self.assertEqual(set(panel.buttons), set(self.ui.guard_panel.buttons))
-        self.assertIn("risk_process_failure", panel.details.get("1.0", "end"))
-        self.assertTrue(self.core.guard_inspected)
-        tabs.select(general)
+        self.assertEqual(self.ui.guard_location_var.get(), "")
+        self.assertFalse(self.ui.guard_panel.winfo_ismapped())
+        self.ui.guard_location_buttons["REMOTE"].invoke()
         self.root.update()
-        self.assertEqual(general.children["status"].cget("text"), "Lokale Dienstverbindung aktiv")
-        tabs.select(services)
+        self.assertTrue(self.ui.guard_setup_prompt.winfo_ismapped())
+        self.ui.open_bridge_management("sh-guard").window.destroy()
+        self.ui.cancel_guard_location()
+        self.ui.guard_location_buttons["LOCAL"].invoke()
         self.root.update()
-        self.assertEqual(services.winfo_children(), [panel])
-        self.ui.open_guard_window()
-        self.assertIs(self.ui.guard_window, window)
+        self.assertTrue(self.ui.guard_panel.winfo_ismapped())
+        self.assertEqual(self.core.service_location("sh-guard"), "LOCAL")
+        self.assertEqual(self.core.service_location("mcp"), "LOCAL")
+        self.assertIsNone(self.core.remote_management.bridge_worker)
         self.assertFalse(self.core.risk_requested)
-        window.destroy()
 
     def test_settings_gears_inspect_inactive_services_without_enabling_them(self):
         for button in (self.ui.risk_settings_button, self.ui.text_settings_button):
