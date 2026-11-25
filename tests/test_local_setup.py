@@ -234,7 +234,8 @@ class InstallationTests(unittest.TestCase):
     def test_cancelled_background_bootstrap_cannot_handoff_owned_process_late(self):
         entered, release = threading.Event(), threading.Event()
         process = mock.Mock()
-        def bootstrap():
+        def bootstrap(directory):
+            self.assertEqual(directory, "/unused")
             entered.set()
             release.wait(3)
             return process
@@ -463,7 +464,7 @@ class AppVersionConsistencyTests(unittest.TestCase):
     muessen identisch sein; --version existiert im Haupt-Parser."""
 
     def test_version_sources_pinned(self):
-        self.assertEqual(a.APP_VERSION, "0.9.30")
+        self.assertEqual(a.APP_VERSION, "0.9.34")
         self.assertEqual(a.BRIDGE_SERVER_INFO["name"], "admin-in-the-loop")
         self.assertEqual(a.BRIDGE_SERVER_INFO["version"], a.APP_VERSION)
 
@@ -537,6 +538,53 @@ class ApplicationUpdateTests(unittest.TestCase):
         self.update(older, branch="development", allow_downgrade=True)
         self.assertEqual(self.target.read_bytes(), older)
 
+    def test_explicit_main_migrates_published_review_settings_before_replacing_app(self):
+        config = self.target.parent / "config"
+        store = a.PreferenceStore(config)
+        store.save(False, "MEDIUM")
+        settings = config / "preferences.json"
+        recipient = "ab" * 32
+        saved = dict(json.loads(settings.read_bytes()), language="de", command_risk=True,
+                     command_risk_host=recipient, text_review_output=True)
+        settings.write_text(json.dumps(saved))
+        self.target.write_bytes(self.source)
+        stable = self.source.replace(a.APP_VERSION.encode(), b"0.9.30")
+        with mock.patch.object(a, "preference_directory", return_value=config):
+            with self.assertRaisesRegex(a.ProbeError, "update_downgrade"):
+                self.update(stable)
+            self.assertEqual(json.loads(settings.read_bytes()), saved)
+            self.assertEqual(self.update(stable, branch="main", allow_downgrade=True), 0)
+        self.assertEqual(self.target.read_bytes(), stable)
+        self.assertEqual(self.target.with_suffix(".py.bak").read_bytes(), self.source)
+        compatible = {field: value for field, value in saved.items()
+                      if field not in {"command_risk", "command_risk_host"}}
+        self.assertEqual(json.loads(settings.read_bytes()), compatible)
+        self.assertEqual(store.command_risk_recipient(), recipient)
+        self.assertEqual(store.load(), (False, "MEDIUM"))
+
+    def test_failed_preference_migration_preserves_current_app_and_retries(self):
+        config = self.target.parent / "config"
+        store = a.PreferenceStore(config)
+        store.save(False, "SMALL")
+        settings = config / "preferences.json"
+        current = dict(json.loads(settings.read_bytes()), command_risk=True, command_risk_host="ab" * 32)
+        settings.write_text(json.dumps(current))
+        self.target.write_bytes(self.source)
+        stable = self.source.replace(a.APP_VERSION.encode(), b"0.9.30")
+        real_replace = os.replace
+        def fail_settings(source, dest, **kwargs):
+            if dest == "preferences.json":
+                raise OSError("fixture")
+            return real_replace(source, dest, **kwargs)
+        with mock.patch.object(a, "preference_directory", return_value=config):
+            with mock.patch.object(os, "replace", side_effect=fail_settings), self.assertRaisesRegex(a.ProbeError, "update_preferences"):
+                self.update(stable, branch="main", allow_downgrade=True)
+            self.assertEqual(self.target.read_bytes(), self.source)
+            self.assertFalse(self.target.with_suffix(".py.bak").exists())
+            self.assertEqual(json.loads(settings.read_bytes()), current)
+            self.assertEqual(self.update(stable, branch="main", allow_downgrade=True), 0)
+        self.assertEqual(store.command_risk_recipient(), current["command_risk_host"])
+
     def test_failed_download_and_failed_replace_keep_original(self):
         with mock.patch.object(a, "download_app_update", side_effect=a.ProbeError("update_download")), \
                 redirect_stdout(io.StringIO()), self.assertRaisesRegex(a.ProbeError, "update_download"):
@@ -578,6 +626,7 @@ class ApplicationUpdateTests(unittest.TestCase):
         cases = [("update", [], "GeektankLabs", "main", False),
                  ("--update", [], "GeektankLabs", "main", False),
                  ("update", ["geco91"], "geco91", "main", False),
+                 ("update", ["geco91", "main"], "geco91", "main", True),
                  ("--update", ["geco91", "feature/test"], "geco91", "feature/test", True)]
         for command, values, owner, branch, explicit in cases:
             with self.subTest(command=command, values=values), \
@@ -612,6 +661,34 @@ class ApplicationUpdateTests(unittest.TestCase):
             response.read.assert_called_once_with(a.APP_UPDATE_LIMIT+1)
             with self.assertRaisesRegex(a.ProbeError, "update_redirect"):
                 build.call_args.args[0].redirect_request(None, None, 302, "", {}, "http://other/")
+
+
+class TerminalSettingsTests(unittest.TestCase):
+    def test_start_directory_and_return_survive_restart_and_stable_preferences(self):
+        with tempfile.TemporaryDirectory() as directory:
+            prefs = a.PreferenceStore(Path(directory, "config"))
+            prefs.save(True, "SMALL")
+            original = (prefs.directory / "preferences.json").read_bytes()
+            with mock.patch.object(Path, "home", return_value=Path(directory)):
+                core = a.AppCore(prefs)
+                try:
+                    core.start_local(prefs.directory)
+                    self.assertEqual(core.endpoint.workdir, str(prefs.directory))
+                    core.set_terminal_home(True)
+                    self.assertEqual(core.endpoint.workdir, directory)
+                    self.assertEqual((prefs.directory / "preferences.json").read_bytes(), original)
+                    core.set_final_return(False, update_review=False)
+                finally:
+                    core.close()
+                restored = a.AppCore(a.PreferenceStore(prefs.directory))
+                try:
+                    self.assertFalse(restored.final_return)
+                    restored.start_local(prefs.directory)
+                    self.assertEqual(restored.endpoint.workdir, directory)
+                    restored.set_terminal_home(False)
+                    self.assertEqual(restored.endpoint.workdir, str(prefs.directory))
+                finally:
+                    restored.close()
 
 
 class TerminalHistoryTests(unittest.TestCase):

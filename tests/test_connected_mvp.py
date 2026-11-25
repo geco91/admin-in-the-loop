@@ -33,6 +33,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import admin_in_the_loop as a
+from test_command_risk import select_fixture_tool
 
 
 def request(url, method="GET", path=None, body=None, headers=None):
@@ -2605,7 +2606,7 @@ class BridgeTunnelTests(unittest.TestCase):
             log = buffer.getvalue()
             self.assertEqual((status["phase"], status["detail"]), ("error", "tunnel_download_failed"))
             self.assertIn("Tunnel-Vorbereitung: offizielles Release von GitHub laden", log)
-            self.assertIn("Tunnel-Status: error (tunnel_download_failed)", log)
+            self.assertIn("Bridge -> Tunnel-Client: Status error (tunnel_download_failed)", log)
             self.assertNotIn("K" * 32, log)
 
     def test_finds_state_dir_client_kit(self):
@@ -4149,7 +4150,7 @@ class RiskSentPreservationTests(unittest.TestCase):
 
     def test_result_preserved_across_sent_states_without_reanalysis(self):
         self.core.review_command("printf x")
-        self.core.set_command_risk(self.fake_tool(), str(self.work))
+        select_fixture_tool(self.core, self.fake_tool(), self.work)
         first = self.until(lambda value: value.state == "RESULT").result
         reviewer = self.core._command_risk
         for state in ("CHECKING", "TRANSFERRED", "TRANSFER_UNCERTAIN", "TRANSFERRED"):
@@ -4179,7 +4180,7 @@ class RiskSentPreservationTests(unittest.TestCase):
 
     def test_inflight_scan_without_result_is_cancelled_at_send(self):
         self.core.review_command("hang-command")
-        self.core.set_command_risk(self.fake_tool(), str(self.work))
+        select_fixture_tool(self.core, self.fake_tool(), self.work)
         self.until(lambda value: value.state == "SCANNING")
         self.core.review_state = "CHECKING"
         snapshot = self.core.command_risk_snapshot()
@@ -4196,7 +4197,7 @@ class RiskSentPreservationTests(unittest.TestCase):
         # preserved at sent states; UNAVAILABLE keeps the pre-M3 discard
         # (frozen evidence semantics, test_command_risk.py parity).
         self.core.review_command("printf x")
-        self.core.set_command_risk(self.fake_tool(bad=True), str(self.work))
+        select_fixture_tool(self.core, self.fake_tool(bad=True), self.work)
         snapshot = self.until(lambda value: value.state == "UNAVAILABLE")
         self.assertEqual(snapshot.result.state, "UNAVAILABLE")
         self.core.review_state = "CHECKING"
@@ -4206,7 +4207,7 @@ class RiskSentPreservationTests(unittest.TestCase):
 
     def test_direction_and_session_changes_invalidate_at_sent(self):
         self.core.review_command("printf x")
-        self.core.set_command_risk(self.fake_tool(), str(self.work))
+        select_fixture_tool(self.core, self.fake_tool(), self.work)
         first = self.until(lambda value: value.state == "RESULT").result
         self.core.review_state = "TRANSFERRED"
         self.assertIs(self.core.command_risk_snapshot().result, first)
@@ -4951,6 +4952,38 @@ class QrexecBridgeFirstTests(unittest.TestCase):
         self.assertIsNone(self.bridge.process.poll())
         self.assertEqual(a.BridgeHTTP(profile).request("GET", "/v1/status")["state"], "PAIRED")
         self.assertEqual(recovered.connection_store.load_connection(), before)
+
+    def test_service_locations_reuse_one_authenticated_qube_forwarder(self):
+        main = self.make_core()
+        profile = main.pair_remote(self.bridge.url, self.bridge_pin, self.bridge.code)
+        main.connection_store.save_connection(profile, qrexec={"target": "review-qube", "port": self.bridge_port})
+        main.saved_connection = main.connection_store.load_connection()
+        main.set_service_location("mcp", "LOCAL")
+        main.set_service_location("sh-guard", "REMOTE")
+        def until(predicate):
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline:
+                main.pump()
+                if predicate():
+                    return
+                time.sleep(.04)
+            self.fail("Timed out waiting for the shared Qube connection")
+        with mock.patch.dict(os.environ, {"AITL_TEST_REMOTE_PORT": str(self.bridge_port)}):
+            main.restore_services()
+            remote = main.remote_management
+            main.guard_inspected = True
+            until(lambda: remote.bridge_state == "CONNECTED" and main.guard_status()["state"] == "INSTALL_CONFIRM")
+            self.assertEqual(main.guard_location()[1], "review-qube")
+            self.assertIsNone(main.bridge_worker)
+            forwarder = remote.qrexec_forwarder
+            pgid = forwarder.pgid
+            self.assertNotEqual(forwarder.port, self.bridge_port)
+            main.select_mcp_location("REMOTE")
+            until(lambda: main.chat_binding is not None)
+            self.assertEqual(main.guard_client.profile.forward_port, main.bridge_profile.forward_port)
+            self.assertEqual(main.bridge_profile.forward_port, forwarder.port)
+            self.assertFalse(main.qrexec_forwarder.running)
+            self.assertEqual(remote.qrexec_forwarder.pgid, pgid)
 
     def test_deny_down_plain_are_evidenced_separately_not_blanket_policy(self):
         text = a.ConnectionDialog.error_text

@@ -17,6 +17,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import admin_in_the_loop as a
+from test_bridge_shguard import guard_bridge
 import test_command_risk as fixtures
 
 
@@ -280,6 +281,7 @@ class InstallationTests(unittest.TestCase):
 class ActivationTests(unittest.TestCase):
     def setUp(self):
         InstallationTests.setUp(self)
+        self.bridge = guard_bridge(self, self.base, self.release)
         self.core = a.AppCore(preference_store=a.PreferenceStore(self.base))
         self.core.session, self.core.connection = "TEST_SESSION", "CONNECTED"
         self.core.set_command_target("TERMINAL")
@@ -287,7 +289,7 @@ class ActivationTests(unittest.TestCase):
         self.core.channel.receive.return_value = []
         self.addCleanup(self.core.close)
 
-    def until(self, state, timeout=4):
+    def until(self, state, timeout=12):
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             snap = self.core.command_risk_snapshot()
@@ -300,18 +302,14 @@ class ActivationTests(unittest.TestCase):
         self.core.review_command("printf before")
         with mock.patch.object(a, "command_risk_release", return_value=self.release), \
                 mock.patch.object(a, "download_command_risk", self.transport):
-            # The default callable was bound at definition; inject only at setup boundary.
-            original = a.CommandRiskSetup
-            with mock.patch.object(a, "CommandRiskSetup", side_effect=lambda installation, install=False:
-                                   original(installation, install, self.transport)):
-                self.core.request_command_risk(True)
-                self.until("INSTALL_CONFIRM")
-                self.transport.assert_not_called()
-                self.core.confirm_command_risk_install(True)
-                self.core.review_command("printf after")
-                result = self.until("RESULT").result
-                self.assertEqual(result.data["command"], "printf after\n")
-                self.core.channel.send.assert_not_called()
+            self.core.request_command_risk(True)
+            self.until("INSTALL_CONFIRM")
+            self.transport.assert_not_called()
+            self.core.confirm_command_risk_install(True)
+            self.core.review_command("printf after")
+            result = self.until("RESULT").result
+            self.assertEqual(result.data["command"], "printf after\n")
+            self.core.channel.send.assert_not_called()
 
     def test_approved_installed_fixture_on_scans_existing_without_install_confirmation(self):
         self.installation.install(self.cancel, lambda _: None, self.transport)
@@ -333,36 +331,34 @@ class ActivationTests(unittest.TestCase):
             self.until("INSTALL_CONFIRM")
             self.core.confirm_command_risk_install(False)
             self.assertEqual(self.core.command_risk_snapshot().state, "DISABLED")
+        self.transport.assert_not_called()
+
+    def test_unapproved_bridge_release_is_unavailable(self):
         with mock.patch.object(a, "command_risk_release", return_value=replace(self.release, approved=False)):
             self.core.request_command_risk(True)
-            result = self.core.command_risk_snapshot()
-            self.assertEqual(result.state, "UNAVAILABLE")
+            result = self.until("UNAVAILABLE")
             self.assertEqual(result.error, "risk_pin_not_approved")
         self.transport.assert_not_called()
 
-    def test_off_during_transport_cancels_no_publish_no_late_handoff(self):
-        entered, release = threading.Event(), threading.Event()
-
+    def test_cancel_on_the_bridge_during_download_never_publishes_a_tool(self):
+        entered = threading.Event()
         def delayed(_manifest, cancel):
             entered.set()
-            release.wait(3)
+            cancel.wait(10)
             return self.archive
 
-        original = a.CommandRiskSetup
-        with mock.patch.object(a, "command_risk_release", return_value=self.release), \
-                mock.patch.object(a, "CommandRiskSetup", side_effect=lambda installation, install=False:
-                                  original(installation, install, delayed)):
+        with mock.patch.object(a, "download_command_risk", side_effect=delayed):
             self.core.request_command_risk(True)
             self.until("INSTALL_CONFIRM")
             self.core.confirm_command_risk_install(True)
-            setup = self.core.risk_setup
-            self.assertTrue(entered.wait(2))
+            self.assertTrue(entered.wait(5))
+            self.until("DOWNLOADING")
+            self.core.guard_action("cancel", self.core.guard_status())
+            result = self.until("UNAVAILABLE")
+            self.assertEqual(result.error, "risk_cancelled")
             self.core.request_command_risk(False)
-            release.set()
-            setup.thread.join(2)
-            self.assertFalse(setup.thread.is_alive())
-            self.assertEqual(self.core.command_risk_snapshot().state, "DISABLED")
-            self.assertFalse(self.installation.destination.exists())
+        self.assertFalse(self.installation.destination.exists())
+        self.core.channel.send.assert_not_called()
 
 
 @unittest.skipUnless(os.environ.get("DISPLAY"), "controlled Tk display not supplied")
@@ -373,6 +369,7 @@ class RiskGUITests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.base = Path(self.temp.name).resolve() / "config"
         self.core = a.AppCore(preference_store=a.PreferenceStore(self.base))
+        self.core.set_service_location("sh-guard", "LOCAL")
         self.core.session, self.core.connection = "GUI_TEST_SESSION", "CONNECTED"
         self.core.set_command_target("TERMINAL")
         self.core.channel = mock.Mock()
@@ -391,7 +388,7 @@ class RiskGUITests(unittest.TestCase):
         self.ui = self.root = self.core = None
         gc.collect()  # Dispose Tcl-owned cycles on the creating thread, before another worker starts.
 
-    def until(self, predicate, timeout=4):
+    def until(self, predicate, timeout=12):
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             self.root.update()
@@ -402,6 +399,7 @@ class RiskGUITests(unittest.TestCase):
         self.fail("gui_fixture_deadline")
 
     def test_unadmitted_release_unavailable_no_dialog_no_autonomous_transfer(self):
+        guard_bridge(self, self.base)
         self.core.review_command("printf x")
         self.ui.render()
         self.assertFalse(self.ui.risk_enabled.get())
@@ -410,7 +408,7 @@ class RiskGUITests(unittest.TestCase):
                 mock.patch.object(a.subprocess, "Popen") as spawn:
             self.ui.risk_checkbox.invoke()
             self.root.update()
-            self.assertIn("nicht für die Installation zugelassen", self.ui.risk_hint.get())
+            self.until(lambda: "nicht für die Installation zugelassen" in self.ui.risk_hint.get())
             confirm.assert_not_called()
             spawn.assert_not_called()
         self.assertTrue(self.ui.approve_button.instate(["!disabled"]))
@@ -429,19 +427,18 @@ class RiskGUITests(unittest.TestCase):
         source = "echo '🙂\n€'\n"
         review = self.core.review_command(source)
         self.ui.render()
-        original = a.CommandRiskSetup
-        with mock.patch.object(a, "command_risk_release", return_value=release), \
-                mock.patch.object(a, "CommandRiskSetup", side_effect=lambda installation, install=False:
-                                  original(installation, install, lambda *_: raw)):
+        guard_bridge(self, self.base, release)
+        with mock.patch.object(a, "download_command_risk", return_value=raw):
             self.ui.risk_checkbox.invoke()
             self.until(lambda: self.core.risk_setup_state == "INSTALL_CONFIRM")
             self.assertEqual(self.ui.risk_views.select(), str(self.ui.risk_settings_page))
             self.assertEqual(self.ui.review_notebook.select(), str(self.ui.risk_summary_tab))
             self.assertEqual(self.core.review_state, "REVIEW")
-            self.ui.risk_install_button.invoke()
+            self.until(lambda: self.ui.guard_panel.buttons["install"].instate(["!disabled"]))
+            self.ui.guard_panel.buttons["install"].invoke()
             self.until(lambda: self.ui.risk_status.get().startswith("Kritisch · 100/100"))
-        self.assertEqual(self.core.risk_installation.release.version, "0.1.10")
-        self.assertTrue(self.core.risk_installation.destination.is_relative_to(self.base))
+        self.assertEqual(release.version, "0.1.10")
+        self.assertTrue(Path(self.core.guard_status()["destination"]).is_relative_to(self.base))
         display = self.ui.editor.text.get("1.0", "end-1c")
         self.assertEqual(display, "".join(value for value, _ in a.review_fragments(review.text)))
         ranges = self.ui.editor.text.tag_ranges("risk-sub-0")

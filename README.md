@@ -16,6 +16,24 @@ weitergegeben. Das Terminal bleibt unabhängig manuell bedienbar.
 
 ## Aktuelle persönliche Testversion
 
+Auf dem Testbranch **0.9.34** steht unter den Logos von **Terminal** und **AI / MCP**
+jeweils **Einrichtung & Einstellungen**. Links wählst du das Befehlsziel,
+rechts den AI-Anbieter. **ChatGPT Secure MCP** ist verfügbar. **Local AI**
+zeigt zunächst „Noch nicht implementiert.“ und kehrt zur aktiven Auswahl zurück.
+Der Terminaldialog speichert das finale Return für neue Befehle und den
+optionalen Start neuer Terminals im Home-Verzeichnis. Standardmäßig startet
+die Shell im Startverzeichnis der Anwendung. [Vorschau mit Zwischenablage](doc/assets/review-sides/arbeitsplatz.png) · [Vorschau mit verbundenem Terminal](doc/assets/review-sides/terminalmodus.png)
+
+Das Zahnrad unten links im Hauptfenster
+die externe Bridge ein. Bei gespeicherter Kopplung zeigt es **Bridge-Verwaltung
+öffnen** und den Verbindungsstatus. Unter **Befehlsprüfung → sh-guard →
+Einstellungen** und **AI / MCP → Einrichtung & Einstellungen** wählst du den
+Standort je Dienst. Auch ein lokaler MCP-Tunnel mit externer Analyse ist möglich.
+Direkt auf dem Bridge-System öffnet `python3 admin_in_the_loop.py --bridge --gui`
+die Verwaltung mit **Allgemein** und **Dienste**. Zum Testen auf
+Hauptprogramm und Bridge jeweils `python3 admin_in_the_loop.py update geco91 feat/bridge-sh-guard`
+ausführen und die jeweilige Anwendung neu starten. [Einrichtung und Datenfluss](doc/SH_GUARD.md)
+
 **v0.9.30 ist die aktuelle persönliche Testversion auf `geco91/main`.**
 Der allgemeine MCP-Abruf liefert nur die zuletzt geteilte Ausgabe, solange sie
 zur Abholung bereitsteht. Nach dem Versand der Antwort entfernt die Bridge den
@@ -56,12 +74,11 @@ als Standard für neue Vorgänge gewählt. Bei Terminaltrennung gilt wieder
 Zwischenablage. Eine laufende Kopierprüfung wird beim Öffnen der Shell nicht
 automatisch zur Terminalfreigabe.
 
-**Ausgabebereich → Zwischenablage** und das Ziel für AI-Vorschläge sind gekoppelt.
-Diese Auswahl gilt deshalb auch bei geöffnetem Terminal: AI-Vorschläge werden
-nur mit **In Zwischenablage kopieren** übernommen und nicht ins Terminal gesendet.
-Ein Wechsel bei offenem Command erzeugt einen neuen Review; alte Freigaben gelten
-nicht mehr. Während Übernahme oder Zustellung ist die Moduswahl gesperrt.
-Zeilenbereiche bzw. **Letzter Command** schalten zurück zum Terminalmodus.
+Über **Befehlsziel → Zwischenablage** kannst du bei geöffnetem Terminal zum
+Kopieren wechseln. Ein freigegebener AI-Vorschlag wird dann in die Zwischenablage
+kopiert. Wählst du wieder **Terminal**, erscheint darunter der **Ausgabebereich**
+für die Rückgabeprüfung. Ein Wechsel des Ziels bei offenem Command erzeugt eine
+neue Prüffassung. Während Übernahme oder Zustellung ist die Moduswahl gesperrt.
 
 Links liest **Prüfen →** den aktuellen Zwischenablagetext zur Rückgabe an die AI.
 Erst nach Prüfung und ausdrücklicher Freigabe wird er geteilt. Die Rückgabe ist
@@ -111,6 +128,9 @@ python3 admin_in_the_loop.py update geco91
 
 # Ausdrücklich einen Entwicklungsbranch dieses Forks ausprobieren
 python3 admin_in_the_loop.py update geco91 feature/mein-branch
+
+# Vom Testbranch zur aktuellen stabilen Version im Fork zurückkehren
+python3 admin_in_the_loop.py update geco91 main
 ```
 
 `--update` funktioniert genauso wie `update`. Ohne Nutzernamen gilt immer
@@ -118,13 +138,15 @@ python3 admin_in_the_loop.py update geco91 feature/mein-branch
 `main`. Die Quelle wird nicht dauerhaft umgestellt: Für weitere Updates aus
 einem Fork dessen Namen wieder angeben. Der Entwicklungsbranch muss existieren.
 
-Das Update prüft Python-Syntax sowie übereinstimmende App-/Bridge-Versionen,
-führt den Download dabei nicht aus und ersetzt nur die Anwendungsdatei atomar.
-`admin_in_the_loop.py.bak` enthält die unmittelbar vorherige Datei. Gleicher
-Dateiinhalt wird nicht erneut geschrieben. Einstellungen, Verbindungen und
-installierte Prüftools werden nicht überschrieben. App und gegebenenfalls eine
-separat laufende Bridge anschließend neu starten; diese werden nicht automatisch
-beendet oder aktualisiert. Bei getrennten Qubes die jeweilige Kopie aktualisieren.
+Das Update prüft Python-Syntax und übereinstimmende App-/Bridge-Versionen und
+ersetzt die Anwendungsdatei atomar. `admin_in_the_loop.py.bak` enthält die
+unmittelbar vorherige Datei. Beim Wechsel von **0.9.31** zunächst einmal
+`python3 admin_in_the_loop.py update geco91 feat/bridge-sh-guard` ausführen.
+Ab **0.9.32** bereitet der Updater auch die in 0.9.31 gespeicherten
+sh-guard-Einstellungen für den Rückweg vor. Die Remote-Aktivierung bleibt an
+ihre Bridge gebunden. Version 0.9.30 liest weiterhin ihre lokale Einstellung.
+Bei getrennten Qubes beide Kopien aktualisieren und die jeweiligen Prozesse
+neu starten. In 0.9.30 startet die separate Bridge im Konsolenmodus mit `--bridge`.
 
 Ohne ausdrücklich angegebenen Branch wird eine ältere Versionsnummer abgelehnt.
 Das Original kann hinter dem Fork liegen. Mit beiden Parametern ist auch ein
@@ -193,9 +215,9 @@ historische Stände. Die Runtime-Versionsquelle ist `APP_VERSION` in
 Hosted ChatGPT-Work, offizielles Tunnelbinary und native Desktop-Abnahmen bleiben
 offene separate Schritte; der aktuelle Verbindungs-Prüfnachweis steht in
 [CONNECTION_UX.md](doc/CONNECTION_UX.md). Die Mac-Vorschau ist
-nicht integriert. Der optionale sh-guard-Reviewer bleibt beim Erststart aus;
-die bewusste Aktivierung wird gespeichert. Installation und lokale Analyse sind
-mit gepinnten v0.1.10-Binaries integriert; siehe [sh-guard-Anleitung und Prüfnachweise](doc/SH_GUARD.md).
+nicht integriert. Der optionale sh-guard-Reviewer ist beim Erststart ausgeschaltet.
+Die Aktivierung gilt für den gewählten Bridge-Standort. Dort installiert die
+Bridge das gepinnte v0.1.10-Binary und analysiert Befehle. [sh-guard-Anleitung und Prüfnachweise](doc/SH_GUARD.md)
 
 Der [Testbericht vom 30. September 2026](tests/MVP_0.8_TEST_REPORT.md) dokumentiert
 damalige Linux-/Ubuntu-Prüfungen. Er belegt keine aktuelle native macOS- oder

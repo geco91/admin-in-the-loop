@@ -24,6 +24,11 @@ class CommandRiskUXTests(unittest.TestCase):
         import tkinter as tk
         self.temp = tempfile.TemporaryDirectory()
         self.core = a.AppCore(a.PreferenceStore(Path(self.temp.name) / "config"))
+        self.guard = mock.Mock()
+        self.guard.status = {"version": 1, "instance": "a"*32, "generation": 1, "state": "UNAVAILABLE",
+                             "error": "risk_process_failure", "target": None, "destination": None}
+        self.enterContext(mock.patch.object(a, "BridgeGuardClient", return_value=self.guard))
+        self.core.guard_consent = "local"
         self.core.session, self.core.connection = "UX_TEST", "CONNECTED"
         self.core.set_command_target("TERMINAL")
         self.core.channel = mock.Mock()
@@ -302,55 +307,73 @@ class CommandRiskUXTests(unittest.TestCase):
         self.core.channel.send.assert_not_called()
 
     def test_inline_install_requires_explicit_choice_and_keeps_actions_visible(self):
-        for accepted in (False, True):
-            with self.subTest(accepted=accepted):
-                self.core.risk_requested = True
-                self.core.risk_setup_state = "INSTALL_CONFIRM"
-                installation = a.CommandRiskInstallation(self.core.preference_store.directory, a.command_risk_release())
-                self.core.risk_installation = installation
-                choices = []
-
-                def commit(confirmed):
-                    choices.append(confirmed)
-                    self.core.request_command_risk(False)
-
-                with mock.patch.object(self.core, "confirm_command_risk_install", side_effect=commit), \
-                        mock.patch.object(a, "CommandRiskSetup") as setup:
-                    self.ui.show_review_settings("sh-guard")
-                    self.root.update()
-                    self.ui.render()
-                    self.assertEqual(choices, [])
-                    source = self.ui.risk_setup_box.text.get("1.0", "end")
-                    self.assertIn(installation.release.url, source)
-                    self.assertIn(str(installation.destination), source)
-                    self.assertIn(installation.release.archive_sha256, source)
-                    self.assertIn("Einrichtung nötig", source)
-                    self.assertIn("Einrichtung nötig", self.ui.review_notebook.tab(self.ui.risk_summary_tab, "text"))
-                    for button in (self.ui.risk_install_button, self.ui.risk_install_cancel):
-                        self.assertTrue(button.winfo_ismapped())
-                        self.assertLessEqual(button.winfo_rooty() + button.winfo_height(),
-                                             self.root.winfo_rooty() + self.root.winfo_height())
-                    self.assertFalse(any(w.winfo_viewable() for w in self.root.winfo_children()
-                                         if isinstance(w, self.ui.tk.Toplevel)))
-                    self.press(self.ui.risk_install_button if accepted else self.ui.risk_install_cancel, "Return")
-                    self.assertEqual(choices, [accepted])
-                    setup.assert_not_called()
-                self.core.channel.send.assert_not_called()
-
-    def test_changed_activation_invalidates_queued_install_choice(self):
-        self.core.risk_requested = True
-        self.core.risk_setup_state = "INSTALL_CONFIRM"
-        self.core.risk_installation = a.CommandRiskInstallation(self.core.preference_store.directory, a.command_risk_release())
+        release = a.command_risk_release()
+        self.guard.status = dict(self.guard.status, state="INSTALL_CONFIRM", error=None,
+                                 target=release.target, destination="/bridge/tools/sh-guard")
         self.ui.show_review_settings("sh-guard")
-        old_command = self.ui.risk_install_button.cget("command")
-        self.core.risk_setup_epoch += 1
-        with mock.patch.object(self.core, "confirm_command_risk_install") as confirm:
+        panel = self.ui.guard_panel
+        self.root.update()
+        self.assertFalse(panel.details.winfo_viewable())
+        panel.disclosure.invoke()
+        self.root.update()
+        self.assertTrue(panel.details.winfo_viewable())
+        source = panel.details.get("1.0", "end")
+        for label in (release.url, self.guard.status["destination"], release.archive_sha256):
+            self.assertIn(label, source)
+        self.guard.action.assert_not_called()
+        self.assertFalse(self.core.risk_requested)
+        for button in panel.buttons.values():
+            self.assertTrue(button.winfo_ismapped())
+            self.assertLessEqual(button.winfo_rooty() + button.winfo_height(),
+                                 self.root.winfo_rooty() + self.root.winfo_height())
+        self.press(panel.buttons["install"], "Return")
+        self.guard.action.assert_called_once_with("install", self.guard.status)
+        self.guard.status = dict(self.guard.status, state="DOWNLOADING", generation=2)
+        panel.refresh()
+        self.press(panel.buttons["cancel"], "Return")
+        self.guard.action.assert_called_with("cancel", self.guard.status)
+        self.core.channel.send.assert_not_called()
+
+    def test_changed_service_generation_invalidates_queued_install_choice(self):
+        self.guard.status = dict(self.guard.status, state="INSTALL_CONFIRM", error=None)
+        self.ui.show_review_settings("sh-guard")
+        old_command = self.ui.guard_panel.buttons["install"].cget("command")
+        self.guard.status = dict(self.guard.status, generation=2)
+        with mock.patch.object(self.ui.messagebox, "showerror") as stale:
             self.root.tk.call(old_command)
-            confirm.assert_not_called()
-        self.assertTrue(self.core.risk_requested)
-        self.ui.show_review_code()
-        self.ui.render()
-        self.assertEqual(self.ui.review_notebook.select(), str(self.ui.code_tab))
+            self.guard.action.assert_not_called()
+            stale.assert_called_once()
+        self.assertFalse(self.core.risk_requested)
+
+    def test_global_bridge_entry_and_first_service_location_are_independent(self):
+        self.core.guard_consent = None
+        self.ui.bridge_button.invoke()
+        dialog = self.ui.bridge_dialog
+        self.root.update()
+        self.assertEqual(self.ui.bridge_button.cget("text"), "Externe Bridge einrichten")
+        self.assertEqual(dialog.window.title(), "Externe Bridge · Allgemein")
+        self.assertFalse(dialog.tunnel_section.winfo_viewable())
+        self.assertFalse(dialog.chat_section.winfo_viewable())
+        self.assertFalse(self.core.guard_inspected)
+        self.assertIs(self.ui.open_bridge_management(), dialog)
+        dialog.window.destroy()
+
+        self.ui.show_review_settings("sh-guard")
+        self.root.update()
+        self.assertEqual(self.ui.guard_location_var.get(), "")
+        self.assertFalse(self.ui.guard_panel.winfo_ismapped())
+        self.ui.guard_location_buttons["REMOTE"].invoke()
+        self.root.update()
+        self.assertTrue(self.ui.guard_setup_prompt.winfo_ismapped())
+        self.ui.open_bridge_management("sh-guard").window.destroy()
+        self.ui.cancel_guard_location()
+        self.ui.guard_location_buttons["LOCAL"].invoke()
+        self.root.update()
+        self.assertTrue(self.ui.guard_panel.winfo_ismapped())
+        self.assertEqual(self.core.service_location("sh-guard"), "LOCAL")
+        self.assertEqual(self.core.service_location("mcp"), "LOCAL")
+        self.assertIsNone(self.core.remote_management.bridge_worker)
+        self.assertFalse(self.core.risk_requested)
 
     def test_settings_gears_inspect_inactive_services_without_enabling_them(self):
         for button in (self.ui.risk_settings_button, self.ui.text_settings_button):
@@ -362,7 +385,7 @@ class CommandRiskUXTests(unittest.TestCase):
             self.root.update()
             self.assertFalse(self.ui.review_options.winfo_viewable())
             self.assertEqual(self.ui.risk_views.select(), str(self.ui.risk_settings_page))
-            self.assertIn("Ausgeschaltet", self.ui.risk_setup_box.text.get("1.0", "end"))
+            self.assertIn("Dienst nicht verfügbar", self.ui.guard_panel.details.get("1.0", "end"))
             self.assertFalse(self.core.risk_requested)
             activate.assert_not_called()
             self.ui.close_review_settings("sh-guard")
@@ -382,18 +405,18 @@ class CommandRiskUXTests(unittest.TestCase):
         self.enable_guard_view()
         self.ui.show_review_settings("sh-guard")
         self.root.update()
-        self.assertIn("Initialisierung fehlgeschlagen", self.ui.risk_setup_box.text.get("1.0", "end"))
-        self.assertIn("risk_process_failure", self.ui.risk_setup_box.text.get("1.0", "end"))
-        self.assertFalse(self.ui.risk_install_button.winfo_ismapped())
-        with mock.patch.object(self.core, "request_command_risk") as activate:
-            self.press(self.ui.risk_setup_retry, "Return")
-            activate.assert_called_once_with(True)
+        panel = self.ui.guard_panel
+        self.assertIn("risk_process_failure", panel.details.get("1.0", "end"))
+        self.assertTrue(panel.buttons["install"].instate(["disabled"]))
+        self.press(panel.buttons["check"], "Return")
+        self.guard.action.assert_called_once_with("check", self.guard.status)
         self.ui.show_review_code()
-        self.core.risk_setup_state = "CHECKING_TOOL"
+        self.guard.status = dict(self.guard.status, state="CHECKING_TOOL")
+        panel.refresh()
         self.ui.render()
         self.assertEqual(self.ui.review_notebook.select(), str(self.ui.code_tab))
-        self.assertTrue(self.ui.risk_setup_retry.instate(["disabled"]))
-        self.core.risk_setup_state = "INSTALL_CONFIRM"
+        self.assertTrue(panel.buttons["check"].instate(["disabled"]))
+        self.guard.status = dict(self.guard.status, state="INSTALL_CONFIRM")
         self.ui.render()
         self.assertEqual(self.ui.review_notebook.select(), str(self.ui.code_tab))
         self.assertIn("Einrichtung nötig", self.ui.review_notebook.tab(self.ui.risk_summary_tab, "text"))
@@ -401,6 +424,7 @@ class CommandRiskUXTests(unittest.TestCase):
 
     def test_error_retry_and_busy_cancel_have_explicit_keyboard_actions(self):
         self.core.risk_requested = True
+        self.core.guard_status()
         state = a.CommandRiskSnapshot("UNAVAILABLE", error="risk_download_timeout")
         with mock.patch.object(self.core, "command_risk_snapshot", return_value=state) as snapshot, \
                 mock.patch.object(self.core, "request_command_risk") as requested:
@@ -411,8 +435,8 @@ class CommandRiskUXTests(unittest.TestCase):
             self.assertIn("erneut versuchen", self.ui.risk_hint.get())
             self.assertEqual(self.ui.risk_action_button.cget("text"), "Erneut prüfen")
             self.press(self.ui.risk_action_button, "Return")
-            requested.assert_called_once_with(True)
-            requested.reset_mock()
+            self.guard.action.assert_called_once_with("check", self.guard.status)
+            self.guard.status = dict(self.guard.status, state="DOWNLOADING", generation=2)
             snapshot.return_value = a.CommandRiskSnapshot("DOWNLOADING")
             self.ui.render()
             self.root.update()
@@ -421,9 +445,11 @@ class CommandRiskUXTests(unittest.TestCase):
             self.assertEqual(self.ui.risk_action_button.cget("text"), "Abbrechen")
             # A result arriving just before the click must not reinterpret the
             # visible Cancel button as an activation/retry request.
+            displayed_cancel = self.ui.risk_action_button.cget("command")
             snapshot.return_value = self.result()
-            self.press(self.ui.risk_action_button, "Return")
-            requested.assert_called_once_with(False)
+            self.root.tk.call(displayed_cancel)
+            self.guard.action.assert_called_with("cancel", self.guard.status)
+            requested.assert_not_called()
             self.assertFalse(self.ui.risk_progress_running)
             self.core.channel.send.assert_not_called()
 

@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.9.34 — Terminalziel und AI-Anbieter im Hauptfenster
+
+- Beide Seitenleisten öffnen ihre Einstellungen direkt unter dem Logo. Links stehen das Befehlsziel und im Terminalmodus der Ausgabebereich.
+- Der Terminaldialog speichert das finale Return für neue Befehle und den optionalen Start neuer Terminals im Home-Verzeichnis.
+- Beim Start einer Shell bindet ein kleiner Python-Prozess Bash direkt an das Pseudoterminal. Das verkürzt den Weg zum ersten Prompt auf langsamen Systemen.
+- Rechts ist ChatGPT Secure MCP als AI-Anbieter ausgewählt. Bei der Auswahl von Local AI erscheint „Noch nicht implementiert.“
+
+## 0.9.33 — Gemeinsame Bridge-Verbindung und Standortwahl pro Dienst
+
+- Das Zahnrad unten links öffnet die Einrichtung oder Verwaltung der externen Bridge. Eine gespeicherte Kopplung bleibt auch offline sichtbar.
+- sh-guard und Secure MCP Tunnel lassen sich unabhängig voneinander lokal oder auf der gekoppelten Bridge betreiben. Die Erstkopplung führt zum gewählten Dienst zurück.
+- Die Standortwahl liegt in einer eigenen Einstellungsdatei. Bestehende Kopplungen und empfängergebundene Freigaben bleiben lesbar.
+
+## 0.9.32 — Rückwechsel vom Bridge-Testbranch zu main
+
+- `update geco91 main` unterstützt den Rückwechsel zu 0.9.30 auch mit einer in
+  0.9.31 gespeicherten sh-guard-Aktivierung. Der Empfänger einer Remote-Freigabe
+  wird separat gespeichert. Die stabile Version kann die gemeinsamen Einstellungen
+  lesen und bearbeiten, beim späteren Wechsel auf den Testbranch gilt weiterhin
+  die Freigabe für denselben Empfänger.
+
+## 0.9.31 — sh-guard auf der Bridge
+
+- Eine lokale oder gekoppelte Bridge lädt, prüft und installiert sh-guard und
+  analysiert den ausgewählten Befehlsstand über ihre authentifizierte Controller-API.
+- Die Dienstverwaltung zeigt den Standort im Einstellungsreiter, als Unterfenster
+  und auf dem Bridge-Rechner mit `--bridge --gui`. Eine lokale Aktivierung aus
+  früheren Versionen gilt für die lokale Bridge. Eine Remote-Analyse wird für
+  ihren konkreten Empfänger aktiviert.
+- Im Verwaltungsfenster zeigt **Allgemein** Standort und Verbindung. Auf der
+  Bridge lässt sich hier das Hauptprogramm koppeln. **Dienste** öffnet die
+  Installations- und Prüfaktionen für sh-guard.
+
 ## 0.9.30 — Zuletzt geteilte Ausgabe einmalig abholen
 
 - Der allgemeine Abruf bietet ausschließlich die jüngste Freigabe an, solange sie

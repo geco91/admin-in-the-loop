@@ -3,8 +3,8 @@
 
 Run: python3 admin_in_the_loop.py --self-test
 GUI: python3 admin_in_the_loop.py  (or --gui)
-Bridge-only: python3 admin_in_the_loop.py --bridge --state-dir DIR
-Tkinter + native terminal + authenticated local IPC; optional transport-only bridge.
+Bridge service manager: python3 admin_in_the_loop.py --bridge --gui
+Tkinter, native terminal, authenticated local IPC and bridge-hosted review tools.
 The helper is the only reader of the shell PTY; the Controller reads an IPC copy.
 Both GUI and tests use AppCore. Tests use a clean temporary Bash, never sudo/SSH.
 The GUI shell starts in the launching directory, without profiles or persistent history.
@@ -28,6 +28,7 @@ import select
 import selectors
 import shutil
 import signal
+import socket
 import stat
 import subprocess
 import sys
@@ -36,33 +37,107 @@ import tempfile
 import time
 import unicodedata
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
 
 
-# Kanonische Version (Journal 8.10.: jede ausgelieferte Codeaenderung erhoehrt
-# mindestens den Patch-Stand). BRIDGE_SERVER_INFO pflegt eine separate Kopie im
-# Bridge-Block; ein Konsistenztest pinnt beide auf denselben Wert.
-APP_VERSION = "0.9.30"
-
-
 # Single canonical UI/CLI version. The embedded bridge block keeps its own copy in
 # BRIDGE_SERVER_INFO; a consistency test pins both to the same value (Journal #88ff:
 # every delivered program state bumps at least the patch digit).
-APP_VERSION = "0.9.30"
+APP_VERSION = "0.9.34"
+
+
+if os.name == "posix":
+    import fcntl
+
+MAX_COMMAND = 4096
+MAX_LINES = 50
+
+
+class ProbeError(Exception):
+    """Fixed reason code only: never include commands, outputs, or secrets."""
+
+
+def require(condition: bool, code: str) -> None:
+    if not condition:
+        raise ProbeError(code)
+
+
+def normalize_command(text: str, final_return: bool) -> bytes:
+    if not isinstance(text, str) or type(final_return) is not bool:
+        raise ProbeError("invalid_input_type")
+    if len(text) > MAX_COMMAND:
+        raise ProbeError("command_too_large")
+    text = text.replace("\r\n", "\n").replace("\r", "\n").rstrip("\n")
+    if not text or not text.strip():
+        raise ProbeError("empty_command")
+    if final_return:
+        text += "\n"
+    for char in text:
+        if char != "\n" and char != " " and (
+            unicodedata.category(char).startswith("C")
+            or unicodedata.category(char).startswith("Z")
+        ):
+            raise ProbeError("forbidden_character")
+    try:
+        payload = text.encode("utf-8", errors="strict")
+    except UnicodeError:
+        raise ProbeError("invalid_utf8") from None
+    if len(payload) > MAX_COMMAND or len(text.splitlines()) > MAX_LINES:
+        raise ProbeError("command_limit")
+    return payload
+
+
+@dataclass(frozen=True)
+class LocalReview:
+    id: str
+    revision: int
+    direction: str
+    session: str | None
+    text: str
+    payload: bytes
+    final_return: bool
+    lost_prefix: bool = False
+    bridge_binding: tuple | None = None
+    proposal_id: str | None = None
+    expires_at: float | None = None
+    edited: bool = False
+    normalization: tuple | None = None  # Counts only; never retain original command text.
+    output_source: str = "TERMINAL"
+    command_target: str = "TERMINAL"
+
+    @property
+    def requires_terminal(self):
+        return (self.direction == "TO_TERMINAL" and self.command_target == "TERMINAL"
+                or self.direction == "TO_OUTPUT_SINK" and self.output_source == "TERMINAL")
+
+    @property
+    def presentation(self):
+        # JSON string notation distinguishes backslashes, LF, Unicode and controls.
+        return json.dumps(self.text, ensure_ascii=True)
 
 
 def _load_bridge_component(namespace=None):
     """Load the marked transport component alone, or expose it to controller/tests."""
     source = Path(__file__).read_text(encoding="utf-8")
-    begin = "## BEGIN AITL EMBEDDED BRIDGE SOURCE\n"
-    end = "\n## END AITL EMBEDDED BRIDGE SOURCE"
-    start = source.index(begin) + len(begin)
-    stop = source.index(end, start)
+    def load_block(name, target):
+        begin = "## BEGIN AITL " + name + "\n"
+        start = source.index(begin) + len(begin)
+        end = source.index("\n## END AITL " + name, start)
+        exec(compile(source[start:end], str(Path(__file__).resolve()), "exec"), target)
+
     if namespace is None:
         namespace = {"__name__": "_aitl_embedded_bridge", "__file__": str(Path(__file__).resolve())}
-    exec(compile(source[start:stop], str(Path(__file__).resolve()), "exec"), namespace)
+    shared = globals()
+    if "ShellGuardService" not in shared:  # Standalone role stops before the controller/PTY imports.
+        shared = dict(shared)
+        load_block("SHARED REVIEW SERVICE", shared)
+    namespace.update(ShellGuardService=shared["ShellGuardService"], ProbeError=ProbeError,
+                     build_guard_settings=shared["build_guard_settings"],
+                     show_bridge_management=shared["show_bridge_management"])
+    load_block("EMBEDDED BRIDGE SOURCE", namespace)
     return namespace
 
 
@@ -84,16 +159,11 @@ if len(sys.argv) > 1 and sys.argv[1] == "--bridge":
         sys.exit(2)
 
 if os.name == "posix":
-    import fcntl
     import termios
 
 PROMPT = b"AITL_P0$ "
-MAX_COMMAND = 4096
-MAX_LINES = 50
-
-
-class ProbeError(Exception):
-    """Fixed reason code only: never include commands, outputs, or secrets."""
+# Keep interactive history expansion off so Bash cannot rewrite a reviewed payload.
+BASH_INTERACTIVE_ARGS = ("--noprofile", "--norc", "-i", "+H")
 
 
 class OverrideRequired(ProbeError):
@@ -104,11 +174,6 @@ class SafeArgumentParser(argparse.ArgumentParser):
     def error(self, message):
         self.print_usage(sys.stderr)
         self.exit(2, "Stopped: invalid_cli_arguments (content omitted).\n")
-
-
-def require(condition: bool, code: str) -> None:
-    if not condition:
-        raise ProbeError(code)
 
 
 APP_UPDATE_LIMIT = 4 * 1024 * 1024
@@ -196,8 +261,9 @@ def update_application(owner=APP_UPDATE_OWNER, branch="main", target=None, *, al
         print("Updatequelle: " + app_update_url(owner, branch), flush=True)
         candidate = download_app_update(owner, branch)
         new_version = app_update_version(candidate)
-        require(allow_downgrade or tuple(map(int, new_version.split("."))) >=
-                tuple(map(int, old_version.split("."))), "update_downgrade")
+        old_number = tuple(map(int, old_version.split(".")))
+        new_number = tuple(map(int, new_version.split(".")))
+        require(allow_downgrade or new_number >= old_number, "update_downgrade")
         require(fingerprint(target.lstat()) == fingerprint(info), "update_target_changed")
         if candidate == original:
             print("Bereits aktuell: " + old_version)
@@ -213,6 +279,14 @@ def update_application(owner=APP_UPDATE_OWNER, branch="main", target=None, *, al
                 destination.flush()
                 os.fsync(destination.fileno())
         require(fingerprint(target.lstat()) == fingerprint(info), "update_target_changed")
+        if new_number < (0, 9, 31) <= old_number:
+            # Also covers 0.9.31 -> fixed branch -> main with no intervening GUI start.
+            preferences = PreferenceStore(preference_directory())
+            try:
+                if (preferences.directory / "preferences.json").exists():
+                    preferences.load()
+            except (OSError, ProbeError) as exc:
+                raise ProbeError("update_preferences") from exc
         os.replace(staged[0], backup)
         os.replace(staged[1], target)
         print("Aktualisiert: " + old_version + " → " + new_version)
@@ -227,31 +301,6 @@ def update_application(owner=APP_UPDATE_OWNER, branch="main", target=None, *, al
     finally:
         for path in staged:
             path.unlink(missing_ok=True)
-
-
-def normalize_command(text: str, final_return: bool) -> bytes:
-    if not isinstance(text, str) or type(final_return) is not bool:
-        raise ProbeError("invalid_input_type")
-    if len(text) > MAX_COMMAND:
-        raise ProbeError("command_too_large")
-    text = text.replace("\r\n", "\n").replace("\r", "\n").rstrip("\n")
-    if not text or not text.strip():
-        raise ProbeError("empty_command")
-    if final_return:
-        text += "\n"
-    for char in text:
-        if char != "\n" and char != " " and (
-            unicodedata.category(char).startswith("C")
-            or unicodedata.category(char).startswith("Z")
-        ):
-            raise ProbeError("forbidden_character")
-    try:
-        payload = text.encode("utf-8", errors="strict")
-    except UnicodeError:
-        raise ProbeError("invalid_utf8") from None
-    if len(payload) > MAX_COMMAND or len(text.splitlines()) > MAX_LINES:
-        raise ProbeError("command_limit")
-    return payload
 
 
 @dataclass(frozen=True)
@@ -403,13 +452,16 @@ class PtySession:
             "HISTCONTROL": "ignoredups:ignorespace", "INPUTRC": "/dev/null",
         }
         try:
-            # Fresh helper process, never preexec_fn or fork from an active GUI.
+            # The child claims the controlling tty before exec. Keep this bootstrap
+            # independent of the size of the UI/bridge file on the prompt deadline.
             self.proc = subprocess.Popen(
-                [sys.executable, "-I", str(Path(__file__).resolve()),
-                 "--_shell-child", str(slave), str(bash)],
-                cwd=directory, env=child_env, close_fds=True, pass_fds=(slave,),
-                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                [sys.executable, "-I", "-S", "-c",
+                 "import fcntl, os, sys, termios\n"
+                 "fcntl.ioctl(0, termios.TIOCSCTTY, 0)\n"
+                 "os.execv(sys.argv[1], sys.argv[1:])",
+                 bash, *BASH_INTERACTIVE_ARGS],
+                cwd=directory, env=child_env, close_fds=True, start_new_session=True,
+                stdin=slave, stdout=slave, stderr=slave,
             )
         except BaseException:
             os.close(self.master)
@@ -541,16 +593,19 @@ class PtySession:
         self.closed = True
 
 
-def shell_child(fd: int, bash: str) -> None:
-    """Internal trusted role. Attach controlling tty, then replace with Bash."""
+def attach_terminal(fd):
     os.setsid()
     fcntl.ioctl(fd, termios.TIOCSCTTY, 0)
     for destination in (0, 1, 2):
         os.dup2(fd, destination)
     if fd > 2:
         os.close(fd)
-    # Recall is local editing; history expansion must never rewrite an approved payload.
-    os.execve(bash, [bash, "--noprofile", "--norc", "-i", "+H"], dict(os.environ))
+
+
+def shell_child(fd: int, bash: str) -> None:
+    """Accept the internal startup arguments of controllers already running during an update."""
+    attach_terminal(fd)
+    os.execv(bash, [bash, *BASH_INTERACTIVE_ARGS])
 
 
 def expect_error(fn, code: str | None = None) -> None:
@@ -1296,6 +1351,28 @@ def run_terminal_helper(directory):
             signal.signal(sig, handler)
 
 
+# The native terminal helpers do not need to load the controller, Tk or the
+# embedded bridge and its tool catalog on their time-limited startup path.
+if __name__ == "__main__" and os.name == "posix" and sys.version_info >= (3, 11) and (
+        len(sys.argv) == 4 and sys.argv[1] in {"--_shell-child", "--_outer-test-child"}
+        or len(sys.argv) == 3 and sys.argv[1] == "--terminal-helper" and not sys.argv[2].startswith("-")):
+    try:
+        if sys.argv[1] == "--_shell-child":
+            shell_child(int(sys.argv[2]), sys.argv[3])
+        elif sys.argv[1] == "--_outer-test-child":
+            attach_terminal(int(sys.argv[2]))
+            run_terminal_helper(sys.argv[3])
+        else:
+            run_terminal_helper(sys.argv[2])
+    except ProbeError as exc:
+        print("Stopped: " + str(exc), file=sys.stderr)
+        sys.exit(2)
+    except Exception:
+        print("Stopped: local runtime error (content omitted).", file=sys.stderr)
+        sys.exit(2)
+    sys.exit(0)
+
+
 def sanitized_output(raw):
     """Bounded transcript, not a screen emulator. Strip CSI/OSC/DCS; mark controls."""
     require(len(raw) <= OUTPUT_LIMIT, "output_selection_limit")
@@ -1455,35 +1532,6 @@ class TranscriptRing(OutputRing):
 
 
 @dataclass(frozen=True)
-class LocalReview:
-    id: str
-    revision: int
-    direction: str
-    session: str | None
-    text: str
-    payload: bytes
-    final_return: bool
-    lost_prefix: bool = False
-    bridge_binding: tuple | None = None
-    proposal_id: str | None = None
-    expires_at: float | None = None
-    edited: bool = False
-    normalization: tuple | None = None  # Counts only; never retain original command text.
-    output_source: str = "TERMINAL"
-    command_target: str = "TERMINAL"
-
-    @property
-    def requires_terminal(self):
-        return (self.direction == "TO_TERMINAL" and self.command_target == "TERMINAL"
-                or self.direction == "TO_OUTPUT_SINK" and self.output_source == "TERMINAL")
-
-    @property
-    def presentation(self):
-        # JSON string notation distinguishes backslashes, LF, Unicode and controls.
-        return json.dumps(self.text, ensure_ascii=True)
-
-
-@dataclass(frozen=True)
 class AppSnapshot:
     connection: str
     session: str | None
@@ -1504,6 +1552,7 @@ class AppSnapshot:
 
 
 COMMAND_TARGETS = {"TERMINAL": "Terminal", "CLIPBOARD": "Zwischenablage"}
+AI_PROVIDERS = ("ChatGPT Secure MCP", "Local AI")
 BLOCK_SIZES = ("SINGLE", "SMALL", "MEDIUM", "LARGE")
 OUTPUT_MODES = {
     "LAST_1": "Letzte Zeile",
@@ -1517,6 +1566,34 @@ OUTPUT_MODES = {
 # Authored UI text only: payloads, protocol identifiers and third-party output
 # never pass through this catalog. Kept inline for single-file installations.
 UI_ENGLISH = {
+    "Befehlsziel": "Command destination",
+    "AI-Anbieter": "AI provider",
+    "Terminal · Einrichtung & Einstellungen": "Terminal · Setup & Settings",
+    "Finales Return für neue Terminalbefehle": "Append a final Return to new terminal commands",
+    "Neue Terminals im Home-Verzeichnis starten": "Start new terminals in the home directory",
+    "Noch nicht implementiert.": "Not implemented yet.",
+    "Externe Bridge einrichten": "Setup Remote Bridge",
+    "Bridge-Verwaltung öffnen": "Open Bridge Management",
+    "Externe Bridge": "Remote bridge",
+    "Auf diesem Rechner": "On this computer",
+    "Über die externe Bridge": "Use remote bridge",
+    "Wo soll sh-guard laufen?": "Where should sh-guard run?",
+    "Wo soll der Secure MCP Tunnel laufen?": "Where should the Secure MCP Tunnel run?",
+    "Zuerst die externe Bridge koppeln.": "Pair the remote bridge first.",
+    "AI / MCP · Einrichtung & Einstellungen": "AI / MCP · Setup & Settings",
+    "Externe Bridge · Allgemein": "Remote Bridge · General",
+    "Verbindungsweg auswählen": "Choose how to connect",
+    "Verbindung im Ziel-Qube einrichten": "Connect to another Qube",
+    "Über HTTPS verbinden": "Connect over HTTPS",
+    "Adresse und Pfade prüfen, den Startbefehl auf dem Bridge-Rechner ausführen und die Verbindung testen.": "Check the address and paths, run the start command on the bridge host, then test the connection.",
+    "Die Kopplung gilt für alle Dienste auf dieser Bridge.": "Services on this bridge share this pairing.",
+    "Gekoppelt · offline": "Paired · offline",
+    "Verbindung zur externen Bridge wird aufgebaut.": "Connecting to the remote bridge.",
+    "Externe Bridge offline. Die Verbindung lässt sich unten links im Hauptfenster verwalten.": "Remote bridge offline. Manage the connection in the lower-left corner of the main window.",
+    "Gekoppelt · wird verbunden": "Paired · connecting",
+    "Gekoppelt · verbunden": "Paired · connected",
+    "Lokale Bridge": "Local bridge",
+    "Befehle einschließlich lokaler Änderungen zur Analyse an %s senden?": "Send commands including local edits to %s for analysis?",
     'verbunden': 'connected',
     'offen': 'pending',
     'Chat-Code': 'Chat code',
@@ -1960,7 +2037,7 @@ UI_ENGLISH = {
     'sh-guard wird installiert': 'Installing sh-guard',
     'sh-guard wird heruntergeladen': 'Downloading sh-guard',
     'Download wird geprüft': 'Verifying download',
-    'Lokaler Funktionstest läuft': 'Running local functional test',
+    'Funktionstest auf der Bridge läuft': 'Running functional test on the bridge',
     'Vorherige Prüfung wird beendet': 'Finishing previous check',
     'Analyse nicht mehr aktuell': 'Analysis is stale',
     'Analyse unvollständig': 'Analysis incomplete',
@@ -1998,7 +2075,7 @@ UI_ENGLISH = {
     'Originalbegründung von sh-guard\n': 'Original explanation from sh-guard\n',
     'Die statische Bash-Analyse kennt nicht den tatsächlichen Laufzeitzustand. Auch ein unauffälliger Befund ersetzt Ihre Prüfung und Freigabe nicht.\n': 'Static Bash analysis does not know the actual runtime state. Even findings without concerns do not replace your review and approval.\n',
     'So funktioniert die Analyse\n': 'How analysis works\n',
-    'sh-guard untersucht den finalen Command lokal, ohne ihn auszuführen. Die Aktivierung wird gespeichert. Terminalausgaben werden nicht analysiert. Jeder Transfer benötigt weiterhin Ihre eigene Freigabe.\n': 'sh-guard examines the final command locally without executing it. Activation is saved. Terminal output is not analyzed. Every transfer still requires your own approval.\n',
+    'Die gewählte Bridge analysiert die aktuelle Befehlsfassung einschließlich Ihrer Änderungen. Die Aktivierung gilt für diesen Standort. Sie entscheiden über die Übergabe ans Terminal.\n': 'The selected bridge analyzes the current command including your edits. Activation applies to this location. You decide whether to send the command to the terminal.\n',
     'Finale Review-Bytes / Codepoints': 'Final review bytes / codepoints',
     'Finalen Snapshot exakt kopieren': 'Copy final snapshot exactly',
     '%s · Snapshot %s · Revision %d · %s · finales Return %s': '%s · Snapshot %s · Revision %d · %s · final Return %s',
@@ -2188,93 +2265,155 @@ class PreferenceStore:
         self.directory = Path(directory)
 
     def _directory_fd(self):
-        self.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-        fd = os.open(self.directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-        info = os.fstat(fd)
-        if not (info.st_uid == os.getuid() and stat.S_IMODE(info.st_mode) == 0o700):
-            os.close(fd)
-            raise ProbeError("unsafe_preferences_directory")
-        return fd
+        return private_directory_fd(self.directory)
 
-    def _load(self):
+    def _read(self, name):
         directory_fd = None
         try:
             directory_fd = self._directory_fd()
             try:
-                fd = os.open("preferences.json", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd)
+                fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd)
             except FileNotFoundError:
-                return {"version": 1, "final_return": True, "block_size": "SMALL"}
+                return None
             with os.fdopen(fd, "rb") as source:
                 info = os.fstat(source.fileno())
                 require(stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid()
                         and stat.S_IMODE(info.st_mode) == 0o600, "unsafe_preferences_file")
                 raw = source.read(4097)
             require(len(raw) <= 4096, "preferences_limit")
-            value = decode_packet(raw)
-            required = {"version", "final_return", "block_size"}
-            require(type(value) is dict and required <= set(value)
-                    and set(value) <= required | {"language", "command_risk", "text_review", "text_review_command", "text_review_output"}, "invalid_preferences")
-            require(type(value["version"]) is int and value["version"] == 1, "preferences_version")
-            require(type(value["final_return"]) is bool and value["block_size"] in BLOCK_SIZES,
-                    "invalid_preferences")
-            require("command_risk" not in value or type(value["command_risk"]) is bool,
-                    "invalid_preferences")
-            for key in ("text_review", "text_review_command", "text_review_output"):
-                require(key not in value or type(value[key]) is bool, "invalid_preferences")
-            require(type(value.get("language", "system")) is str
-                    and value.get("language", "system") in {"system", "de", "en"}, "invalid_preferences")
-            return value
+            return decode_packet(raw)
         except OSError:
             raise ProbeError("preferences_read_failure") from None
         finally:
             if directory_fd is not None:
                 os.close(directory_fd)
 
+    @contextmanager
+    def _settings(self, *, write=False):
+        directory_fd = self._directory_fd()
+        try:
+            fcntl.flock(directory_fd, fcntl.LOCK_EX)
+            value = self._read("preferences.json")
+            missing = value is None
+            if missing:
+                value = {"version": 1, "final_return": True, "block_size": "SMALL", "command_risk": False}
+            required = {"version", "final_return", "block_size"}
+            require(type(value) is dict and required <= set(value)
+                    and set(value) <= required | {"language", "command_risk", "command_risk_host", "text_review", "text_review_command", "text_review_output"}, "invalid_preferences")
+            require(type(value["version"]) is int and value["version"] == 1, "preferences_version")
+            require(type(value["final_return"]) is bool and value["block_size"] in BLOCK_SIZES, "invalid_preferences")
+            for key in ("command_risk", "text_review", "text_review_command", "text_review_output"):
+                require(key not in value or type(value[key]) is bool, "invalid_preferences")
+            require(type(value.get("language", "system")) is str
+                    and value.get("language", "system") in {"system", "de", "en"}, "invalid_preferences")
+            previous = value.copy()
+            if "command_risk_host" in value:  # First published bridge build (0.9.31).
+                self._set_recipient(value, value.get("command_risk", False), value.pop("command_risk_host"))
+            yield value
+            if previous != value or (write and missing):
+                self._save(value)
+            if (write or "command_risk_host" in previous) and "command_risk" in value:
+                # The stable local on/off switch takes precedence, including edits made on main.
+                try:
+                    os.unlink("bridge-review.json", dir_fd=directory_fd)
+                    os.fsync(directory_fd)
+                except FileNotFoundError:
+                    pass
+        except OSError:
+            raise ProbeError("preferences_write_failure") from None
+        finally:
+            os.close(directory_fd)
+
     def load(self):
-        value = self._load()
-        return value["final_return"], value["block_size"]
+        with self._settings() as value:
+            return value["final_return"], value["block_size"]
 
     def load_language(self):
-        return self._load().get("language", "system")
+        with self._settings() as value:
+            return value.get("language", "system")
 
     def save_language(self, language):
         require(type(language) is str and language in {"system", "de", "en"}, "invalid_preferences")
-        value = self._load()
-        value["language"] = language
-        self._save(value)
+        with self._settings(write=True) as value:
+            value["language"] = language
 
     def load_command_risk(self):
-        return self._load().get("command_risk", False)
+        return self.command_risk_recipient() is not None
 
-    def save_command_risk(self, enabled):
-        require(type(enabled) is bool, "invalid_preferences")
-        value = self._load()
-        value["command_risk"] = enabled
-        self._save(value)
+    def service_locations(self):
+        routes = self._read("service-locations.json")
+        if routes is None:
+            return {}
+        require(type(routes) is dict and all(re.fullmatch(r"[a-z][a-z0-9-]{0,63}", name)
+                and value in ("LOCAL", "REMOTE") for name, value in routes.items()), "invalid_preferences")
+        return routes
+
+    def save_service_location(self, service, location):
+        require(service in ("mcp", "sh-guard") and location in ("LOCAL", "REMOTE"), "invalid_preferences")
+        # Older stable versions can still open the regular preferences and connection files.
+        with self._settings():
+            routes = self.service_locations()
+            routes[service] = location
+            self._save(routes, "service-locations.json")
+
+    def command_risk_recipient(self):
+        with self._settings() as value:
+            if "command_risk" in value:
+                return "local" if value["command_risk"] else None
+            remote = self._read("bridge-review.json")
+            if remote is None:
+                return None
+            require(set(remote) == {"recipient"} and type(remote["recipient"]) is str
+                    and re.fullmatch("[0-9a-f]{64}", remote["recipient"]), "invalid_preferences")
+            return remote["recipient"]
+
+    def _set_recipient(self, value, enabled, host):
+        require(type(enabled) is bool and type(host) is str and (host == "local" or re.fullmatch("[0-9a-f]{64}", host)),
+                "invalid_preferences")
+        if enabled and host != "local":
+            # Publish the recipient first. Stable reads an absent local opt-in as off.
+            self._save({"recipient": host}, "bridge-review.json")
+            value.pop("command_risk", None)
+        else:
+            value["command_risk"] = enabled
+
+    def save_command_risk(self, enabled, host="local"):
+        with self._settings(write=True) as value:
+            self._set_recipient(value, enabled, host)
 
     def load_text_review(self, direction="command"):
         require(direction in {"command", "output"}, "invalid_preferences")
-        value = self._load()
-        return value.get("text_review_" + direction, value.get("text_review", False))
+        with self._settings() as value:
+            return value.get("text_review_" + direction, value.get("text_review", False))
 
     def save_text_review(self, enabled, direction=None):
         require(type(enabled) is bool and direction in {None, "command", "output"}, "invalid_preferences")
-        value = self._load()
-        if direction is None:  # Legacy global setting, readable as the default for both directions.
-            value["text_review"] = enabled
-            value.pop("text_review_command", None)
-            value.pop("text_review_output", None)
-        else:
-            value["text_review_" + direction] = enabled
-        self._save(value)
+        with self._settings(write=True) as value:
+            if direction is None:  # Legacy global setting, readable as the default for both directions.
+                value["text_review"] = enabled
+                value.pop("text_review_command", None)
+                value.pop("text_review_output", None)
+            else:
+                value["text_review_" + direction] = enabled
+
+    def terminal_starts_in_home(self):
+        value = self._read("terminal-settings.json")
+        if value is None:
+            return False
+        require(type(value) is dict and set(value) == {"start_in_home"}
+                and type(value["start_in_home"]) is bool, "invalid_preferences")
+        return value["start_in_home"]
+
+    def save_terminal_home(self, enabled):
+        require(type(enabled) is bool, "invalid_preferences")
+        self._save({"start_in_home": enabled}, "terminal-settings.json")
 
     def save(self, final_return, block_size):
         require(type(final_return) is bool and block_size in BLOCK_SIZES, "invalid_preferences")
-        value = self._load()  # Preserve the opt-in; reject unsafe/malformed files.
-        value.update(final_return=final_return, block_size=block_size)
-        self._save(value)
+        with self._settings(write=True) as value:
+            value.update(final_return=final_return, block_size=block_size)
 
-    def _save(self, value):
+    def _save(self, value, name="preferences.json"):
         directory_fd = None
         temporary = ".preferences-" + uuid.uuid4().hex
         try:
@@ -2285,7 +2424,8 @@ class PreferenceStore:
                 target.write(json.dumps(value, ensure_ascii=True).encode("ascii"))
                 target.flush()
                 os.fsync(target.fileno())
-            os.replace(temporary, "preferences.json", src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+            os.replace(temporary, name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+            os.fsync(directory_fd)
         except OSError:
             raise ProbeError("preferences_write_failure") from None
         finally:
@@ -2350,6 +2490,7 @@ def review_fragments(text):
     return tuple(runs)
 
 
+## BEGIN AITL SHARED REVIEW SERVICE
 import http.client
 import ipaddress
 import queue
@@ -2558,11 +2699,11 @@ class CommandRiskTool:
 @dataclass(frozen=True)
 class CommandRiskKey:
     epoch: int
-    tool: CommandRiskTool
+    tool: CommandRiskTool | BridgeRiskTool
     review_id: str
     revision: int
     direction: str
-    session: str
+    session: str | None
     bridge_binding: tuple | None
     proposal_id: str | None
     expires_at: float | None
@@ -2574,7 +2715,7 @@ class CommandRiskKey:
 class CommandRiskJob:
     key: CommandRiskKey
     review: LocalReview = field(repr=False)
-    directory: str
+    directory: str | None = None
 
 
 @dataclass(frozen=True)
@@ -3010,7 +3151,7 @@ class _RiskDownloadBudget:
             thread.join(timeout=0.02)
 
 
-def _risk_download_handler(budget):
+def _risk_download_handler(budget, context=None):
     from urllib.request import HTTPSHandler
 
     class Connection(http.client.HTTPSConnection):
@@ -3061,10 +3202,10 @@ def _risk_download_handler(budget):
                 raise
             return value
 
-    return Handler(context=ssl.create_default_context())
+    return Handler(context=context or ssl.create_default_context())
 
 
-def download_command_risk(release, cancel):
+def download_command_risk(release, cancel, *, local_network=None):
     """Explicit installer only; pinned HTTPS assets via the configured proxy/trust."""
     from urllib.request import HTTPRedirectHandler, ProxyHandler, build_opener
     from urllib.error import HTTPError
@@ -3097,9 +3238,21 @@ def download_command_risk(release, cancel):
 
     budget, raw = _RiskDownloadBudget(cancel), bytearray()
     try:
-        handler = _risk_download_handler(budget)
+        if local_network:
+            from urllib.request import proxy_bypass_environment
+            class LocalProxy(ProxyHandler):
+                def proxy_open(self, req, proxy, scheme):
+                    if proxy_bypass_environment(req.host, {"no": local_network.get("no_proxy", "")}):
+                        return None
+                    return super().proxy_open(req, proxy, scheme)
+            proxy = LocalProxy({"https": local_network["https_proxy"]} if local_network.get("https_proxy") else {})
+            context = ssl.create_default_context(cafile=local_network.get("SSL_CERT_FILE"),
+                                                 capath=local_network.get("SSL_CERT_DIR"))
+            handler = _risk_download_handler(budget, context)
+        else:
+            proxy, handler = ProxyHandler(), _risk_download_handler(budget)
         budget.check()
-        with build_opener(ProxyHandler(), Redirects(), handler).open(release.url, timeout=budget.timeout()) as response:
+        with build_opener(proxy, Redirects(), handler).open(release.url, timeout=budget.timeout()) as response:
             budget.check()
             while True:
                 budget.check()
@@ -3164,10 +3317,20 @@ def _risk_archive_binary(raw, release, cancel):
     return binary
 
 
+def private_directory_fd(directory):
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    info = os.fstat(fd)
+    if not (info.st_uid == os.getuid() and stat.S_IMODE(info.st_mode) == 0o700):
+        os.close(fd)
+        raise ProbeError("unsafe_preferences_directory")
+    return fd
+
+
 def _risk_private_tree(base, parts):
     """Create only private owned components, relative to a checked config root."""
     require(Path(base).is_absolute() and Path(base).resolve() == Path(base), "risk_directory")
-    fd = PreferenceStore(base)._directory_fd()
+    fd = private_directory_fd(Path(base))
     current = Path(base)
     try:
         for name in parts:
@@ -3304,34 +3467,365 @@ class CommandRiskInstallation:
             os.close(lock)
 
 
-class CommandRiskSetup:
-    """One bounded setup operation; only the owner consumes its data event."""
-    def __init__(self, installation, install=False, transport=download_command_risk):
-        self.cancel = threading.Event()
-        self.events = queue.Queue(maxsize=1)
-        self.progress = queue.Queue(maxsize=4)
-        self.phase = "INSTALLING" if install else "CHECKING_TOOL"
-
-        def run():
-            try:
-                if install:
-                    value = installation.install(self.cancel, self.progress.put_nowait, transport)
-                else:
-                    tool = installation.check(self.cancel)
-                    value = None if tool is None else (tool, str(tool_path_work(installation)))
-                self.events.put_nowait(("ready" if value else "missing", value))
-            except Exception as exc:
-                self.events.put_nowait(("error", str(exc) if isinstance(exc, ProbeError) else "risk_setup_failure"))
-
-        self.thread = threading.Thread(target=run, name="aitl-risk-setup", daemon=True)
-        self.thread.start()
-
-    def close(self):
-        self.cancel.set()
-
-
 def tool_path_work(installation):
     return installation.base / "tools" / "sh-guard" / ".work"
+
+
+def plain_risk_data(value):
+    if isinstance(value, (dict, MappingProxyType)):
+        return {key: plain_risk_data(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [plain_risk_data(item) for item in value]
+    return value
+
+
+class ShellGuardService:
+    """Bridge-owned installation and bounded, read-only command analysis."""
+    def __init__(self, directory, instance, local_network=None):
+        self.instance = instance
+        self.local_network = local_network
+        self.lock = threading.RLock()
+        self.cancel = threading.Event()
+        self.worker = None
+        self.scanning = False
+        self.closed = False
+        self.generation = 0
+        self.tool = self.installation = None
+        self.state, self.error = "INSTALL_CONFIRM", None
+        try:
+            release = command_risk_release()
+            release.validate()
+            base = Path(directory)
+            require(base.is_absolute() and base.resolve() == base, "risk_directory")
+            self.installation = CommandRiskInstallation(base, release)
+            if self.installation.destination.exists() or self.installation.destination.is_symlink():
+                self.action("check", 0)
+        except (OSError, RuntimeError, ProbeError) as exc:
+            self.state = "UNAVAILABLE"
+            self.error = str(exc) if isinstance(exc, ProbeError) else "risk_directory"
+
+    def status(self):
+        with self.lock:
+            install = self.installation
+            return {"version": 1, "instance": self.instance, "generation": self.generation,
+                    "state": self.state, "error": self.error,
+                    "target": install.release.target if install else None,
+                    "binary_sha256": install.release.binary_sha256 if install else None,
+                    "destination": str(install.destination) if install else None}
+
+    def action(self, action, generation):
+        with self.lock:
+            require(not self.closed and self.installation is not None, "risk_unavailable")
+            require(type(generation) is int and generation == self.generation, "risk_stale")
+            if action == "cancel":
+                require(self.worker is not None, "risk_setup_state")
+                self.cancel.set()
+                return self.status()
+            require(action in {"check", "install", "remove"}, "risk_action")
+            require(self.worker is None and not self.scanning, "risk_setup_busy")
+            if action == "install":
+                require(self.state == "INSTALL_CONFIRM", "risk_install_state")
+            if action == "remove":
+                require(self.state == "READY", "risk_install_state")
+            self.generation += 1
+            self.tool = self.error = None
+            self.state = "INSTALLING" if action == "install" else "CHECKING_TOOL"
+            self.cancel = threading.Event()
+            self.worker = threading.Thread(target=self._setup, args=(action,), name="aitl-bridge-sh-guard", daemon=True)
+            try:
+                self.worker.start()
+            except RuntimeError:
+                self.worker = None
+                self.state, self.error = "UNAVAILABLE", "risk_setup_failure"
+            return self.status()
+
+    def _setup(self, action):
+        def progress(phase):
+            with self.lock:
+                self.state = phase
+        tool, error = None, None
+        try:
+            if action == "install":
+                download = download_command_risk
+                if self.local_network:
+                    from functools import partial
+                    download = partial(download, local_network=self.local_network)
+                tool, _ = self.installation.install(self.cancel, progress, download)
+            elif action == "remove":
+                self.installation.remove()
+            else:
+                tool = self.installation.check(self.cancel)
+        except (OSError, ProbeError) as exc:
+            error = str(exc) if isinstance(exc, ProbeError) else "risk_setup_failure"
+        except Exception:
+            error = "risk_setup_failure"
+        finally:
+            with self.lock:
+                self.tool, self.error = tool, error
+                self.state = "UNAVAILABLE" if error else "READY" if tool else "INSTALL_CONFIRM"
+                self.worker = None
+
+    def analyze(self, value):
+        _risk_fields(value, "version instance generation review_id revision text final_return sha256")
+        require(type(value["version"]) is int and value["version"] == 1 and value["instance"] == self.instance,
+                "risk_stale")
+        require(type(value["review_id"]) is str and re.fullmatch(r"[a-zA-Z0-9_-]{1,64}", value["review_id"])
+                and type(value["revision"]) is int and 0 <= value["revision"] < 2**63, "risk_snapshot")
+        command = value["text"]
+        payload = normalize_command(command, value["final_return"])
+        require(payload.decode("utf-8") == command and hashlib.sha256(payload).hexdigest() == value["sha256"],
+                "risk_snapshot")
+        with self.lock:
+            require(not self.closed and self.state == "READY" and self.tool is not None, "risk_unavailable")
+            require(type(value["generation"]) is int and value["generation"] == self.generation, "risk_stale")
+            require(not self.scanning, "risk_setup_busy")
+            self.scanning = True
+            tool, cancel = self.tool, self.cancel
+        try:
+            review = LocalReview(value["review_id"], value["revision"], "TO_TERMINAL", None, command,
+                                 payload, value["final_return"])
+            key = CommandRiskKey(value["generation"], tool, review.id, review.revision, review.direction,
+                                 None, None, None, None, review.final_return, value["sha256"])
+            job = CommandRiskJob(key, review, str(tool_path_work(self.installation)))
+            result = run_command_risk(job, cancel)
+            require(result.data is not None, result.error or "risk_unavailable")
+            response = {field: value[field] for field in
+                        ("version", "instance", "generation", "review_id", "revision", "sha256")}
+            response["report"] = plain_risk_data(result.data)
+            return response
+        finally:
+            with self.lock:
+                self.scanning = False
+
+    def close(self):
+        with self.lock:
+            self.closed = True
+            self.cancel.set()
+            worker = self.worker
+        if worker:
+            worker.join(timeout=3)
+
+
+def build_guard_settings(parent, location, read, perform, *, english=False, compact=False):
+    """One service panel shared by Command Review and Bridge management."""
+    import tkinter as tk
+    from tkinter import messagebox, ttk
+
+    def label(de, en):
+        return en if english else de
+
+    frame = ttk.Frame(parent, padding=(8, 2) if compact else 14)
+    window = frame.winfo_toplevel()
+    frame.pack(fill="both", expand=True)
+    frame.columnconfigure(0, weight=1)
+    heading = ttk.Label(frame, font="TkHeadingFont", wraplength=420)
+    heading.grid(row=0, column=0, sticky="w")
+    summary = ttk.Label(frame)
+    summary.grid(row=1, column=0, sticky="w", pady=(2 if compact else 6, 0))
+    hint = ttk.Label(frame, wraplength=420, justify="left")
+    hint.grid(row=2, column=0, sticky="w", pady=(0, 8))
+    def fit(event):
+        width = max(120, event.width - 28)
+        heading.configure(wraplength=width)
+        hint.configure(wraplength=width)
+    frame.bind("<Configure>", fit)
+    actions = ttk.Frame(frame)
+    actions.grid(row=3, column=0, sticky="ew")
+    buttons = {}
+    shown = {}
+    labels = {"install": label("Installieren", "Install"), "check": label("Erneut prüfen", "Check again"),
+              "remove": label("Entfernen", "Remove"), "cancel": label("Abbrechen", "Cancel")}
+    states = {"DISABLED": label("Ausgeschaltet", "Disabled"), "READY": label("Bereit", "Ready"), "INSTALL_CONFIRM": label("Installation erforderlich", "Installation required"),
+              "CHECKING_TOOL": label("Installation wird geprüft", "Checking installation"),
+              "INSTALLING": label("Installation läuft", "Installing"), "DOWNLOADING": label("Download läuft", "Downloading"),
+              "VERIFYING": label("Prüfsumme wird geprüft", "Verifying checksum"), "PROBING": label("Funktionstest läuft", "Testing binary"),
+              "UNAVAILABLE": label("Dienst nicht verfügbar", "Service unavailable")}
+
+    def click(action, previous):
+        if action == "remove" and not messagebox.askyesno(labels[action], heading.cget("text") + "?", parent=window):
+            return
+        try:
+            perform(action, previous)
+        except Exception as exc:
+            messagebox.showerror("sh-guard", str(exc) if isinstance(exc, ProbeError) else "risk_service_error", parent=window)
+
+    def press(event):
+        event.widget.invoke()
+        return "break"
+
+    for name, caption in labels.items():
+        button = ttk.Button(actions, text=caption)
+        column = len(buttons) % 2
+        button.grid(row=len(buttons) // 2, column=column, sticky="ew", padx=(0, 4), pady=1)
+        actions.columnconfigure(column, weight=1)
+        button.bind("<Return>", press)
+        buttons[name] = button
+    detail = tk.StringVar(master=window)
+    technical = ttk.Frame(frame)
+    technical.grid(row=5, column=0, sticky="nsew", pady=(4, 0))
+    frame.rowconfigure(5, weight=1)
+    box = tk.Text(technical, wrap="word", height=6, width=46, state="disabled", font="TkDefaultFont")
+    scroll = ttk.Scrollbar(technical, command=box.yview)
+    box.configure(yscrollcommand=scroll.set)
+    scroll.pack(side="right", fill="y")
+    box.pack(fill="both", expand=True)
+    technical.grid_remove()
+    expanded = tk.BooleanVar(master=window)
+    disclosure = ttk.Checkbutton(frame, text=label("Technische Details anzeigen", "Show technical details"),
+                                 variable=expanded, command=lambda: technical.grid() if expanded.get() else technical.grid_remove())
+    disclosure.grid(row=4, column=0, sticky="w", pady=(6, 0))
+    timer = None
+    scheduler = window.nametowidget(".")
+
+    def tick():
+        nonlocal timer
+        timer = None
+        refresh()
+
+    def refresh():
+        nonlocal timer
+        value = read()
+        if shown != value:
+            shown.clear()
+            shown.update(value)
+            for name, button in buttons.items():
+                button.configure(command=lambda kind=name, before=value.copy(): click(kind, before))
+        state = value["state"]
+        site = location() if callable(location) else location
+        heading.configure(text="sh-guard · " + site)
+        lines = [states.get(state, state)]
+        release = RISK_RELEASES.get(value.get("target"))
+        if release is not None:
+            lines.extend([f"sh-guard {release.version} · {release.target} · {release.archive_size / 1_000_000:.1f} MB",
+                          label("Installationspfad", "Installation path") + "\n" + value["destination"],
+                          label("Downloadquelle", "Download source") + "\n" + release.url,
+                          "SHA-256\n" + release.archive_sha256])
+        summary.configure(text=lines[0] + (f" · v{release.version} · {release.archive_size / 1_000_000:.1f} MB" if release else ""))
+        help_text = ""
+        if state == "INSTALL_CONFIRM":
+            help_text = label("Die Bridge lädt und installiert sh-guard an diesem Standort. "
+                              "Die Analyse aktivieren Sie im Hauptprogramm unter Befehlsprüfung.",
+                              "The bridge downloads and installs sh-guard here. Enable analysis in Command Review in the main application.")
+        elif state == "READY":
+            help_text = label("Bei aktivierter Befehlsprüfung analysiert diese Bridge die aktuelle Befehlsfassung.",
+                              "When Command Review is enabled, this bridge analyzes the current command.")
+        if value.get("error"):
+            messages = {"risk_bridge_update_required": label("Bridge auf Version 0.9.31 oder neuer aktualisieren.",
+                                                              "Update the bridge to version 0.9.31 or later."),
+                        "risk_bridge_disconnected": label("Verbindung zur gewählten Bridge herstellen.",
+                                                          "Connect to the selected bridge."),
+                        "risk_bridge_version_mismatch": label("Toolversionen von Hauptprogramm und Bridge abgleichen.",
+                                                               "Check the tool versions on the controller and bridge.")}
+            help_text = messages.get(value["error"], label("Der Fehlercode steht in den technischen Details.",
+                                                          "See the technical details for the error code."))
+            lines.append(value["error"])
+        hint.configure(text=help_text)
+        message = "\n".join(lines)
+        if detail.get() != message:
+            detail.set(message)
+            box.configure(state="normal")
+            box.delete("1.0", "end")
+            box.insert("1.0", message)
+            box.configure(state="disabled")
+        buttons["install"].configure(text=label("Installieren auf ", "Install on ") + site)
+        enabled = {"install", "check"} if state == "INSTALL_CONFIRM" else {"check", "remove"} if state == "READY" else (
+            {"check"} if state == "UNAVAILABLE" else {"cancel"})
+        for action, button in buttons.items():
+            button.configure(state="normal" if action in enabled and value.get("instance") else "disabled")
+        if timer is None:
+            timer = scheduler.after(400, tick)
+
+    def cancel_timer(event):
+        if event.widget is frame:
+            if timer is not None:
+                scheduler.after_cancel(timer)
+            buttons.clear()
+            frame.refresh = frame.disclosure = frame.details = None
+    frame.bind("<Destroy>", cancel_timer)
+    frame.buttons, frame.details, frame.disclosure, frame.refresh = buttons, box, disclosure, refresh
+    refresh()
+    return frame
+
+
+def show_bridge_management(parent, location, connection_state, build_services, *, english=False,
+                           pairing=None):
+    """Manage pairing and installed services directly on the bridge host."""
+    import tkinter as tk
+    from tkinter import messagebox, ttk
+
+    def label(de, en):
+        return en if english else de
+
+    window = tk.Tk() if parent is None else tk.Toplevel(parent)
+    window.title(label("Bridge-Verwaltung", "Bridge management"))
+    if parent is not None:
+        window.transient(parent)
+    tabs = ttk.Notebook(window, name="tabs")
+    tabs.pack(fill="both", expand=True)
+    general = ttk.Frame(tabs, name="general", padding=16)
+    services = ttk.Frame(tabs, name="services")
+    tabs.add(general, text=label("Allgemein", "General"))
+    tabs.add(services, text=label("Dienste", "Services"))
+    general.columnconfigure(0, weight=1)
+    ttk.Label(general, text=label("Standort der Bridge", "Bridge location")).grid(row=0, column=0, sticky="w")
+    site = ttk.Label(general, font="TkHeadingFont", wraplength=400)
+    site.grid(row=1, column=0, sticky="w")
+    ttk.Label(general, text=label("Hauptprogramm", "Main application")).grid(
+        row=2, column=0, sticky="w", pady=(14, 0))
+    status = ttk.Label(general, name="status", wraplength=400)
+    status.grid(row=3, column=0, sticky="w", pady=(0, 8))
+    states = {"PAIRED": label("Gekoppelt", "Paired"), "UNPAIRED": label("Kopplung ausstehend", "Awaiting pairing"),
+              "CONNECTED": label("Verbunden", "Connected"), "DISCONNECTED": label("Getrennt", "Disconnected"),
+              "LOCAL_SERVICE": label("Lokale Dienstverbindung aktiv", "Local service connection active"),
+              "CONNECTING": label("Verbindung wird hergestellt", "Connecting"),
+              "PAIRING": label("Kopplung läuft", "Pairing"), "RETRYING": label("Erneuter Verbindungsversuch", "Reconnecting"),
+              "BLOCKED": label("Verbindung fehlgeschlagen", "Connection failed")}
+
+    def pair():
+        pin, new_code = pairing
+        messagebox.showinfo(pair_button.cget("text"),
+                            label("Diesen Einmalcode im Hauptprogramm bei der Einrichtung der externen Bridge eingeben.",
+                                  "Enter this one-time code in the main application when pairing the remote bridge.")
+                            + "\n\n" + new_code() + "\n\nSPKI SHA-256\n" + pin, parent=window)
+
+    pair_button = None
+    if pairing is not None:
+        pair_button = ttk.Button(general, command=pair)
+        pair_button.grid(row=4, column=0, sticky="w")
+    timer = None
+
+    def refresh():
+        nonlocal timer
+        site.configure(text=location())
+        state = connection_state()
+        status.configure(text=states.get(state, state))
+        if pair_button is not None:
+            pair_button.configure(text=label("Hauptprogramm neu koppeln", "Pair main application again")
+                                  if state == "PAIRED" else label("Hauptprogramm koppeln", "Pair main application"))
+        timer = window.after(750, refresh)
+
+    def select_tab(_event):
+        nonlocal timer
+        if timer is not None:
+            window.after_cancel(timer)
+            timer = None
+        if tabs.select() == str(general):
+            refresh()
+        elif not services.winfo_children():
+            build_services(services)
+
+    def cancel_timer(event):
+        if event.widget is window and timer is not None:
+            window.after_cancel(timer)
+
+    window.bind("<Destroy>", cancel_timer)
+    tabs.bind("<<NotebookTabChanged>>", select_tab)
+    window.minsize(420, 220)
+    refresh()
+    return window
+
+
+## END AITL SHARED REVIEW SERVICE
 
 
 class CommandRiskReviewer:
@@ -3341,7 +3835,6 @@ class CommandRiskReviewer:
         self.enabled = False
         self.epoch = 0
         self.tool = None
-        self.directory = None
         self.state = "DISABLED"
         self.result = None
         self.current = None
@@ -3366,17 +3859,18 @@ class CommandRiskReviewer:
             self.pending = None
             if self.cancel:
                 self.cancel.set()
+                if self.tool is not None:
+                    self.tool.endpoint.abort_analysis()
         self.current = self.result = None
         self.state = "STALE" if self.enabled else "DISABLED"
 
-    def configure(self, tool=None, directory=None):
+    def configure(self, tool=None):
         self._owner()
         require(not self.stopped, "risk_closed")
-        require(tool is None or type(tool) is CommandRiskTool, "risk_tool")
-        require(tool is None or type(directory) is str and Path(directory).is_absolute(), "risk_directory")
+        require(tool is None or isinstance(tool, BridgeRiskTool), "risk_tool")
         self.invalidate()
         self.epoch += 1
-        self.tool, self.directory = tool, directory
+        self.tool = tool
         self.enabled = tool is not None
         self.state = "IDLE" if self.enabled else "DISABLED"
         if self.enabled and self.thread is None:
@@ -3423,7 +3917,7 @@ class CommandRiskReviewer:
                 self.invalidate()
                 self.current, self.state = key, "SCANNING"
                 with self.condition:
-                    self.pending = CommandRiskJob(key, review, self.directory)
+                    self.pending = CommandRiskJob(key, review)
                     self.condition.notify()
         for _ in range(4):
             try:
@@ -3442,7 +3936,7 @@ class CommandRiskReviewer:
                     return
                 job, self.pending = self.pending, None
                 cancel = self.cancel = threading.Event()
-            result = run_command_risk(job, cancel)
+            result = job.key.tool.analyze(job, cancel)
             while True:
                 try:
                     self.events.put_nowait(result)
@@ -3695,7 +4189,7 @@ class BridgeHTTP:
             except OSError:
                 pass
 
-    def request(self, method, path, value=None, *, authenticate=True):
+    def request(self, method, path, value=None, *, authenticate=True, cancel=None):
         require(method in {"GET", "POST", "PUT"} and path.startswith("/v1/") and len(path) <= 2048,
                 "invalid_network_action")
         conn_type = PinnedHTTPSConnection if self.address.scheme == "https" else http.client.HTTPConnection
@@ -3719,6 +4213,7 @@ class BridgeHTTP:
             require(raw is None or len(raw) <= FRAME_LIMIT, "network_body_limit")
             if raw is not None:
                 headers["Content-Type"] = "application/json"
+            require(cancel is None or not cancel.is_set(), "risk_cancelled")
             conn.request(method, path, raw, headers)
             response = conn.getresponse()
             require(response.getheader("Content-Encoding") in {None, "identity"}, "network_content_encoding")
@@ -3799,6 +4294,19 @@ def validate_remote_tunnel(value):
 
 class ConnectionStore(PreferenceStore):
     """Separate private config. Only connection credentials, never approvals."""
+    def update_connection(self, **changes):
+        directory = self._directory_fd()
+        try:
+            fcntl.flock(directory, fcntl.LOCK_EX)
+            saved = self.load_connection() or {}
+            profile = ConnectionProfile(**saved["profile"]) if saved.get("profile") else None
+            record = dict(profile=profile, tunnel=saved.get("tunnel"), qrexec=saved.get("qrexec"))
+            record.update(changes)
+            self.save_connection(**record, verify_tunnel_binary="tunnel" in changes)
+            return self.load_connection()
+        finally:
+            os.close(directory)
+
     def load_connection(self):
         dfd = self._directory_fd()
         try:
@@ -3837,13 +4345,13 @@ class ConnectionStore(PreferenceStore):
         finally:
             os.close(dfd)
 
-    def save_connection(self, profile=None, tunnel=None, qrexec=None):
+    def save_connection(self, profile=None, tunnel=None, qrexec=None, *, verify_tunnel_binary=True):
         self.load_connection()  # Reject malformed, insecure or symlinked existing state.
         if profile is not None:
             check_profile(profile)
             require(profile.mode == "REMOTE", "local_tokens_not_persistent")
         if tunnel is not None:
-            validate_tunnel(tunnel)
+            validate_tunnel(tunnel, check_binary=verify_tunnel_binary)
         if qrexec is not None:
             fields(qrexec, {"target", "port"})
             validate_qube_name(qrexec["target"])
@@ -4227,7 +4735,7 @@ class QrexecForwarder:
 
 class LocalBridgeProcess:
     """Private pipe bootstrap; transport child inherits no terminal descriptors."""
-    def __init__(self):
+    def __init__(self, service_directory=None):
         self.directory = Path(tempfile.mkdtemp(prefix="aitl-bridge-"))
         os.chmod(self.directory, 0o700)
         self.process = None
@@ -4249,10 +4757,17 @@ class LocalBridgeProcess:
             boot_r = None
             os.close(ready_w)
             ready_w = None
-            os.write(boot_w, net_json({"controller_token": controller_token, "ai_token": self.ai_token,
-                                     "conversation": conversation}))
-            os.close(boot_w)
-            boot_w = None
+            boot = {"controller_token": controller_token, "ai_token": self.ai_token,
+                    "conversation": conversation, "service_directory": str(Path(service_directory or preference_directory()).absolute())}
+            # Only the child installer gets these settings via its private pipe.
+            # They are never exposed as a network configuration endpoint or inherited by an analyzer.
+            boot["download_network"] = {key: value for key in ("https_proxy", "no_proxy", "SSL_CERT_FILE", "SSL_CERT_DIR")
+                                        if (value := os.environ.get(key, os.environ.get(key.upper())))}
+            payload = net_json(boot)
+            require(len(payload) <= 16384, "bridge_bootstrap_limit")
+            with os.fdopen(boot_w, "wb") as pipe:
+                boot_w = None
+                pipe.write(payload)
             data = bytearray()
             deadline = time.monotonic() + 5
             while not data.endswith(b"\n"):
@@ -4264,6 +4779,7 @@ class LocalBridgeProcess:
                     require(len(data) <= 4096, "bridge_ready_limit")
             value = decode_packet(bytes(data))
             fields(value, {"version", "port", "mcp_port", "instance", "conversation", "pin"})
+            self.instance = value["instance"]
             require(value["version"] == 1 and value["conversation"] == conversation and value["pin"] is None,
                     "bridge_ready_schema")
             for key in ("port", "mcp_port"):
@@ -4295,6 +4811,154 @@ class LocalBridgeProcess:
         self.ai_token = ""
         self.chat_code = ""
         shutil.rmtree(self.directory, ignore_errors=True)
+
+
+SH_GUARD_PATH = "/v1/services/sh-guard"
+
+
+def risk_service_error(exc):
+    if isinstance(exc, TransportError):
+        if str(exc) == "network_http_404":
+            return "risk_bridge_update_required"
+        if type(exc.detail) is str and re.fullmatch(r"risk_[a-z_]{1,60}", exc.detail):
+            return exc.detail
+    return str(exc) if isinstance(exc, ProbeError) else "risk_bridge_unavailable"
+
+
+def validate_guard_status(value, instance):
+    fields(value, {"version", "instance", "generation", "state", "target", "binary_sha256", "destination", "error"})
+    require(type(value["version"]) is int and value["version"] == 1 and value["instance"] == instance,
+            "risk_stale")
+    _risk_number(value["generation"], 0, 2**63 - 1)
+    _risk_enum(value["state"], {"INSTALL_CONFIRM", "READY", "UNAVAILABLE", "INSTALLING", "CHECKING_TOOL",
+                                "PROBING", "VERIFYING", "DOWNLOADING"})
+    target, destination, error = value["target"], value["destination"], value["error"]
+    require(error is None or type(error) is str and re.fullmatch(r"risk_[a-z_]{1,60}", error), "risk_schema")
+    if target is None:
+        require(value["state"] == "UNAVAILABLE" and destination is None and value["binary_sha256"] is None, "risk_schema")
+    else:
+        require(type(target) is str and target in RISK_RELEASES and type(destination) is str
+                and destination.startswith("/") and len(destination) <= 2048 and destination.isprintable(), "risk_schema")
+        require(value["binary_sha256"] == RISK_RELEASES[target].binary_sha256, "risk_bridge_version_mismatch")
+    return value
+
+
+@dataclass(frozen=True)
+class BridgeRiskTool:
+    endpoint: object = field(repr=False)
+    generation: int
+    binary: str  # Display-only path at the bridge.
+    version: str
+    sha256: str
+
+    def analyze(self, job, cancel):
+        key = job.key
+        try:
+            require(not cancel.is_set() and not self.endpoint.stop.is_set() and _risk_review_valid(job.review),
+                    "risk_cancelled")
+            identity = {"version": 1, "instance": self.endpoint.instance, "generation": self.generation,
+                        "review_id": key.review_id, "revision": key.revision, "sha256": key.payload_sha256}
+            request = dict(identity, text=job.review.text, final_return=key.final_return)
+            result = self.endpoint.analyze(request, cancel)
+            fields(result, set(identity) | {"report"})
+            require(all(type(result[k]) is type(v) and result[k] == v for k, v in identity.items()), "risk_stale")
+            report = result["report"]
+            require(type(report) is dict and report.get("level") in RISK_LEVELS, "risk_schema")
+            data = validate_command_risk(net_json(report), job.review.text, RISK_LEVELS.index(report["level"]))
+            require(not cancel.is_set() and not self.endpoint.stop.is_set(), "risk_cancelled")
+            return CommandRiskResult(key, "RESULT" if data["parse_confidence"] == "full" else "UNKNOWN", data=data)
+        except Exception as exc:
+            return CommandRiskResult(key, "UNAVAILABLE", risk_service_error(exc))
+
+
+class BridgeGuardClient:
+    """A single management worker for the selected bridge. Tk reads immutable snapshots."""
+    def __init__(self, profile, instance, local_directory):
+        self.profile, self.instance = profile, instance
+        self.local_directory = local_directory
+        self.stop = threading.Event()
+        self.commands = queue.Queue(maxsize=1)
+        self.status = {"state": "CHECKING_TOOL", "instance": None}
+        self.client = None
+        self.scan_client = None
+        self.scan_lock = threading.Lock()
+        self.thread = threading.Thread(target=self.run, name="aitl-guard-client", daemon=False)
+        self.thread.start()
+
+    def action(self, action, previous):
+        require(not self.stop.is_set() and previous.get("instance") is not None
+                and previous.get("instance") == self.instance, "risk_stale")
+        try:
+            self.commands.put_nowait({"version": 1, "instance": self.instance,
+                                      "generation": previous["generation"], "action": action})
+        except queue.Full:
+            raise ProbeError("risk_setup_busy") from None
+
+    def analyze(self, value, cancel):
+        with self.scan_lock:
+            require(not self.stop.is_set() and not cancel.is_set(), "risk_cancelled")
+            client = self.scan_client = BridgeHTTP(self.profile)
+        try:
+            deadline = time.monotonic() + 2 * RISK_TIMEOUT + RISK_LEASE_TIMEOUT
+            while not cancel.is_set() and not self.stop.is_set():
+                try:
+                    return client.request("POST", SH_GUARD_PATH + "/analyze", value, cancel=cancel)
+                except TransportError as exc:
+                    # Busy means the bridge never started this request. An earlier,
+                    # superseded scan may still be reaping its bounded subprocess.
+                    if exc.detail != "risk_setup_busy" or time.monotonic() >= deadline:
+                        raise
+                cancel.wait(0.3)
+            raise ProbeError("risk_cancelled")
+        finally:
+            with self.scan_lock:
+                self.scan_client = None
+
+    def abort_analysis(self):
+        with self.scan_lock:
+            if self.scan_client is not None:
+                self.scan_client.abort()
+
+    def run(self):
+        owned = None
+        try:
+            if self.stop.is_set():
+                return
+            if self.profile is None:
+                owned = LocalBridgeProcess(self.local_directory)
+                self.profile, self.instance = owned.profile, owned.instance
+            client = self.client = BridgeHTTP(self.profile)
+            action = None
+            while not self.stop.is_set():
+                try:
+                    if action is None:
+                        value = client.request("GET", SH_GUARD_PATH, cancel=self.stop)
+                    else:
+                        value = client.request("POST", SH_GUARD_PATH + "/setup", action, cancel=self.stop)
+                    self.status = validate_guard_status(value, self.instance)
+                except Exception as exc:
+                    self.status = {"state": "UNAVAILABLE", "error": risk_service_error(exc), "instance": None}
+                action = None
+                try:
+                    wait = 2 if self.status["state"] in {"READY", "INSTALL_CONFIRM", "UNAVAILABLE"} else 0.4
+                    action = self.commands.get(timeout=wait)
+                except queue.Empty:
+                    pass
+        except Exception as exc:
+            self.status = {"state": "UNAVAILABLE", "error": risk_service_error(exc), "instance": None}
+        finally:
+            if owned:
+                owned.close()
+
+    def close(self):
+        self.stop.set()
+        self.abort_analysis()
+        if self.client:
+            self.client.abort()
+        try:
+            self.commands.put_nowait(None)
+        except queue.Full:
+            pass
 
 
 def validate_tunnel(value, check_binary=True):
@@ -4808,7 +5472,7 @@ class LocalSetupPreparation:
             self.emit("stage", "STARTING")
             phase, component = "STARTING", "Local Bridge"
             require(not self.cancel.is_set(), "local_setup_cancelled")
-            process = LocalBridgeProcess()
+            process = LocalBridgeProcess(directory)
             require(not self.cancel.is_set(), "local_setup_cancelled")
             self.emit("prepared", (process, {"binary": binary, "tunnel_id": tunnel_id, "api_key": api_key}))
             process = None  # Ownership passes through the private event queue to AppCore.
@@ -4830,7 +5494,7 @@ class LocalSetupPreparation:
 
 class BridgeWorker:
     """Network worker with bounded queues. It cannot call AppCore or approve()."""
-    def __init__(self, profile, preference, generation, cursor="", poll_enabled=True):
+    def __init__(self, profile, preference, generation, cursor="", poll_enabled=True, *, status_only=False):
         check_profile(profile)
         self.profile, self.preference, self.generation = profile, preference, generation
         self.client = BridgeHTTP(profile)
@@ -4838,6 +5502,7 @@ class BridgeWorker:
         self.stop = threading.Event()
         self.cursor = cursor
         self.poll_enabled = poll_enabled
+        self.status_only = status_only
         self.thread = threading.Thread(target=self.run, name="aitl-transport", daemon=True)
         self.thread.start()
 
@@ -4876,12 +5541,20 @@ class BridgeWorker:
                         # Idempotent confirm supports recovery after a lost confirm response.
                         status = self.client.request("POST", "/v1/pair/confirm", {"version": 1})
                         instance = validate_status(status, self.profile)
-                        self.client.request("PUT", "/v1/preferences", {"version": 1, "block_size": self.preference})
+                        if not self.status_only:
+                            self.client.request("PUT", "/v1/preferences", {"version": 1, "block_size": self.preference})
                         self.emit("connected", instance)
                         self.emit("certificate_warning", self.client.certificate_warning)
-                        self.emit_chat_binding(instance)
+                        if not self.status_only:
+                            self.emit_chat_binding(instance)
                         next_binding_check = time.monotonic() + 2
                         delay = 1
+                    if self.status_only:
+                        if self.stop.wait(2):
+                            break
+                        status = self.client.request("GET", "/v1/status", cancel=self.stop)
+                        require(validate_status(status, self.profile) == instance, "network_instance_changed")
+                        continue
                     while not self.commands.empty():
                         name, value = self.commands.get_nowait()
                         if name == "advance":
@@ -5159,7 +5832,12 @@ class SavedForwarderPreparation:
 
 class AppCore:
     """Same local actions for Tkinter and tests. No server can call approve()."""
-    def __init__(self, preference_store=None, connection_store=None):
+    def __init__(self, preference_store=None, connection_store=None, *, management_only=False):
+        self.management_only = management_only
+        self.remote_management = None
+        self.remote_mcp_binding = None
+        self.use_remote_mcp = False
+        self.locations = preference_store.service_locations() if preference_store is not None else {}
         self.endpoint = None
         self.channel = None
         self.connection = "DISCONNECTED"
@@ -5175,8 +5853,11 @@ class AppCore:
         self.final_return = True
         self.command_target = "CLIPBOARD"
         self.preference_store = preference_store
+        self.terminal_home = False
+        self.terminal_start_directory = None
         if preference_store is not None:
             self.final_return, self.preferences = preference_store.load()
+            self.terminal_home = preference_store.terminal_starts_in_home()
         self.output_mode = "CLIPBOARD"
         self.last_transfer_offset = None
         self.approved_outputs = deque(maxlen=20)
@@ -5254,114 +5935,222 @@ class AppCore:
         self.remote_tunnel_instance = None
         self._command_risk = CommandRiskReviewer()
         self.risk_requested = False
-        self.risk_setup = None
-        self.risk_installation = None
         self.risk_setup_state = "DISABLED"
         self.risk_setup_error = None
-        self.risk_setup_epoch = 0
-        self.risk_setup_pending = None
+        self.guard_client = None
+        self.guard_route = None
+        self.guard_inspected = False
+        self.guard_closed = False
+        self.guard_consent = preference_store.command_risk_recipient() if preference_store is not None else None
+        if self.guard_consent is not None:
+            self.risk_requested = self.guard_consent == self.guard_location()[0]
 
-        if preference_store is not None and preference_store.load_command_risk():
-            self.request_command_risk(True, persist=False)
+    def saved_remote(self):
+        owner = self.remote_management or self
+        return owner.saved_connection or {}
+
+    def service_location(self, service):
+        if service in self.locations:
+            return self.locations[service]
+        if service == "sh-guard" and self.guard_consent is not None:
+            if self.guard_consent != "local":
+                return "REMOTE"
+            if not self.saved_remote().get("profile") and not self.saved_remote().get("qrexec"):
+                return "LOCAL"
+        # An existing MCP setup retains its previous location. Enrolling the first
+        # external bridge separately records LOCAL before saving a new pairing.
+        if service == "mcp":
+            return "REMOTE" if self.saved_remote().get("profile") else "LOCAL"
+        return None
+
+    def set_service_location(self, service, location):
+        require(service in ("sh-guard", "mcp") and location in ("LOCAL", "REMOTE"), "invalid_preferences")
+        if self.locations.get(service) == location:
+            return
+        previous_host = self.guard_location()[0] if service == "sh-guard" else None
+        if self.preference_store is not None:
+            self.preference_store.save_service_location(service, location)
+        self.locations[service] = location
+        if service == "sh-guard":
+            host = self.guard_location()[0]
+            if host != previous_host:
+                self._drop_guard_client()
+            self.risk_requested = self.guard_consent == host
+
+    def remote_connection(self):
+        if self.remote_management is None:
+            require(not self.management_only, "invalid_bridge_mode")
+            self.remote_management = AppCore(connection_store=self.connection_store, management_only=True)
+        return self.remote_management
+
+    def restore_services(self):
+        remote = self.saved_remote().get("profile")
+        if remote:
+            self.remote_connection().begin_connection_recovery()
+        if self.service_location("mcp") == "REMOTE":
+            self.use_remote_mcp = True
+        elif (self.saved_connection or {}).get("tunnel"):
+            self.begin_connection_recovery()
+
+    def select_mcp_location(self, location):
+        if location == "REMOTE":
+            remote = self.remote_connection()
+            require(remote.saved_remote().get("profile"), "no_saved_remote_connection")
+            if remote.bridge_state in ("DISCONNECTED", "BLOCKED") and remote.recovery_state != "PREPARING":
+                remote.retry_connection_recovery()
+        self.set_service_location("mcp", location)
+        self.use_remote_mcp = location == "REMOTE"
+        if self.bridge_state != "CONNECTED" or location == "LOCAL":
+            self.remote_mcp_binding = None
+        if self.bridge_profile and self.bridge_profile.mode != location:
+            self.disconnect_bridge()
+            self.bridge_profile = None
+        self._sync_remote_mcp()
+
+    def _sync_remote_mcp(self):
+        remote = self.remote_management
+        if not self.use_remote_mcp or remote is None:
+            return
+        binding = remote.paired_remote_binding()
+        if binding == self.remote_mcp_binding:
+            return
+        self.remote_mcp_binding = binding
+        if binding is None:
+            self.disconnect_bridge()
+        else:
+            self.connect_profile(remote.bridge_profile)
+            self.recovery_chat_recipient = remote.bridge_profile.recipient
+
+    def paired_remote_binding(self):
+        saved = self.saved_connection or {}
+        record = saved.get("profile")
+        active = self.bridge_profile
+        if not record or not active or active.recipient != ConnectionProfile(**record).recipient:
+            return None
+        qube = saved.get("qrexec")
+        if qube and (self.qrexec_forwarder.target, self.qrexec_forwarder.remote_port) != (qube["target"], qube["port"]):
+            return None
+        return self._bridge_binding()
+
+    def external_bridge_status(self):
+        saved = self.saved_remote()
+        record = saved.get("profile")
+        if not record:
+            return None, ""
+        site = (saved.get("qrexec") or {}).get("target") or record["url"]
+        remote = self.remote_management or self
+        if remote.paired_remote_binding():
+            return site, tr("Gekoppelt · verbunden")
+        if remote.recovery_state == "PREPARING" or remote.bridge_state in ("CONNECTING", "RETRYING", "PAIRING"):
+            return site, tr("Gekoppelt · wird verbunden")
+        return site, tr("Gekoppelt · offline")
+
+    def _guard_owner(self):
+        location = self.service_location("sh-guard")
+        if location == "REMOTE" and self.remote_management is not None:
+            return self.remote_management
+        return self
+
+    def guard_location(self):
+        choice = self.service_location("sh-guard")
+        if choice == "LOCAL":
+            return "local", tr("Lokale Bridge")
+        owner = self._guard_owner()
+        profile = owner.bridge_profile
+        saved = owner.saved_connection or {}
+        remote = profile if profile and profile.mode == "REMOTE" else None
+        if (profile is None or choice == "REMOTE") and saved.get("profile"):
+            remote = ConnectionProfile(**saved["profile"])
+        if remote is None and (choice == "REMOTE" or profile is None and saved.get("qrexec")):
+            qube = (saved.get("qrexec") or {}).get("target")
+            return hashlib.sha256(net_json(("unpaired", qube))).hexdigest(), qube or tr("Externe Bridge")
+        if remote is None:
+            return "local", tr("Lokale Bridge")
+        qube = (saved.get("qrexec") or {}).get("target") if remote.forward_port or (
+            saved.get("profile") and remote.url == saved["profile"]["url"]) else None
+        identity = hashlib.sha256(net_json((remote.recipient, qube))).hexdigest()
+        return identity, qube or remote.url
+
+    def _drop_guard_client(self):
+        if self.guard_client is not None:
+            self.guard_client.close()
+            self.guard_client = None
+        if isinstance(self._command_risk.tool, BridgeRiskTool):
+            self._command_risk.configure()
+        self.guard_route = None
+
+    def guard_status(self):
+        if self.guard_closed:
+            return {"state": "DISABLED", "instance": None}
+        identity, _ = self.guard_location()
+        owner = self._guard_owner()
+        profile = owner.bridge_profile
+        connected = (owner.bridge_state == "CONNECTED" and profile is not None
+                     and (profile.mode == "LOCAL") == (identity == "local"))
+        if connected and profile.mode == "REMOTE" and (owner.saved_connection or {}).get("profile"):
+            connected = owner.paired_remote_binding() is not None
+        if self.risk_requested and self.guard_consent != identity:
+            self.risk_requested = False
+            self._command_risk.configure()
+        route = (identity, owner.bridge_instance, owner.bridge_generation) if connected else (identity, None)
+        if route != self.guard_route:
+            self._drop_guard_client()
+            self.guard_route = route
+        if not connected and identity != "local":
+            return {"state": "UNAVAILABLE", "error": "risk_bridge_disconnected", "instance": None}
+        if self.guard_client is None:
+            if not (self.guard_inspected or self.risk_requested):
+                return {"state": "DISABLED", "instance": None}
+            directory = self.preference_store.directory if self.preference_store else preference_directory()
+            self.guard_client = BridgeGuardClient(profile if connected else None,
+                                                 owner.bridge_instance if connected else None, directory)
+        return self.guard_client.status
+
+    def guard_action(self, action, previous):
+        current = self.guard_status()
+        require(self.guard_client is not None and previous == current, "risk_stale")
+        self.guard_client.action(action, previous)
 
     def request_command_risk(self, enabled, *, persist=True):
         self._command_risk._owner()
         require(type(enabled) is bool, "risk_enable")
-        persistence_error = None
-        if persist and self.preference_store is not None:
-            try:
-                self.preference_store.save_command_risk(enabled)
-            except ProbeError as exc:
-                if enabled:
-                    raise
-                # Turning the reviewer off must cancel work even on a full disk.
-                # Report that the saved opt-in could not be updated afterwards.
-                persistence_error = exc
-        self.risk_setup_epoch += 1
-        self.risk_requested = enabled
-        self._command_risk.configure()
-        if self.risk_setup:
-            self.risk_setup.close()
-        self.risk_setup_pending = None
-        self.risk_setup_state, self.risk_setup_error = "DISABLED", None
+        host = self.guard_location()[0]
         if not enabled:
-            if persistence_error is not None:
-                raise persistence_error
-            return
-        self.risk_installation = None
-        try:
-            release = command_risk_release()
-            release.validate()  # BEFORE any filesystem, dialog, transport or execution.
-            base = self.preference_store.directory if self.preference_store else preference_directory()
-            self.risk_installation = CommandRiskInstallation(base, release)
-            self._queue_command_risk_setup(False)
-        except ProbeError as exc:
-            self.risk_setup_state, self.risk_setup_error = "UNAVAILABLE", str(exc)
+            previous = self.service_location("sh-guard")
+            if persist and previous and "sh-guard" not in self.locations:
+                # Retain the location inferred from pre-0.9.33 consent when the user disables analysis.
+                self.set_service_location("sh-guard", previous)
+            self.risk_requested = False
+            self._command_risk.configure()
+            self.risk_setup_state, self.risk_setup_error = "DISABLED", None
+        if persist and self.preference_store is not None:
+            self.preference_store.save_command_risk(enabled, host)
+        self.guard_consent = host if enabled else None
+        self.risk_requested = enabled
+        if enabled:
+            self._command_risk.configure()
+            self.command_risk_snapshot()
 
     def confirm_command_risk_install(self, confirmed):
-        self._command_risk._owner()
-        require(self.risk_requested and self.risk_setup_state == "INSTALL_CONFIRM", "risk_install_state")
-        if not confirmed:
+        current = self.guard_status()
+        require(self.risk_requested and current["state"] == "INSTALL_CONFIRM", "risk_install_state")
+        if confirmed:
+            self.guard_action("install", current)
+        else:
             self.request_command_risk(False)
-            return
-        self.risk_installation.release.validate()
-        self._queue_command_risk_setup(True)
-
-    def _queue_command_risk_setup(self, install):
-        self.risk_setup_pending = (self.risk_installation, install)
-        self.risk_setup_state = "WAITING_FOR_REAP"
-        self._pump_command_risk_setup()
-
-    def remove_command_risk(self):
-        self._command_risk._owner()
-        require(self.risk_installation is not None and not self.risk_requested
-                and (self.risk_setup is None or not self.risk_setup.thread.is_alive())
-                and self._command_risk.quiescent(), "risk_cleanup_busy")
-        self.risk_installation.remove()
-
-    def _pump_command_risk_setup(self):
-        setup = self.risk_setup
-        if setup is not None:
-            while True:
-                try:
-                    phase = setup.progress.get_nowait()
-                except queue.Empty:
-                    break
-                if self.risk_requested and not setup.cancel.is_set():
-                    self.risk_setup_state = phase
-            try:
-                kind, value = setup.events.get_nowait()
-            except queue.Empty:
-                kind, value = None, None
-            if kind is not None:
-                self.risk_setup = None
-                if self.risk_requested and not setup.cancel.is_set():
-                    if kind == "ready":
-                        self._command_risk.configure(*value)
-                        self.risk_setup_state, self.risk_setup_error = "READY", None
-                    elif kind == "missing":
-                        self.risk_setup_state = "INSTALL_CONFIRM"
-                    else:
-                        self.risk_setup_state, self.risk_setup_error = "UNAVAILABLE", value
-            # Even a completion event is not permission to overlap the old worker.
-            if setup.thread.is_alive():
-                self.risk_setup = setup
-        if (self.risk_requested and self.risk_setup_pending is not None
-                and (self.risk_setup is None or not self.risk_setup.thread.is_alive())
-                and self._command_risk.quiescent()):
-            installation, install = self.risk_setup_pending
-            self.risk_setup_pending = None
-            self.risk_setup = CommandRiskSetup(installation, install=install)
-            self.risk_setup_state = "INSTALLING" if install else "CHECKING_TOOL"
-
-    def set_command_risk(self, tool=None, directory=None):
-        """Local headless setup only; callers own artifact admission. Default OFF."""
-        self._command_risk.configure(tool, directory)
-        return self.command_risk_snapshot()
 
     def command_risk_snapshot(self):
         self._command_risk._owner()
-        self._pump_command_risk_setup()
+        if self.risk_requested or self.guard_inspected:
+            status = self.guard_status()
+            self.risk_setup_state, self.risk_setup_error = status["state"], status.get("error")
+            tool = None
+            if self.risk_requested and status["state"] == "READY":
+                release = RISK_RELEASES[status["target"]]
+                tool = BridgeRiskTool(self.guard_client, status["generation"], status["destination"],
+                                      release.version, release.binary_sha256)
+            if tool != self._command_risk.tool:
+                self._command_risk.configure(tool)
         if self.risk_requested and self.risk_setup_state != "READY":
             return CommandRiskSnapshot(self.risk_setup_state, error=self.risk_setup_error)
         return self._command_risk.poll(self.review, self.review_state, self.connection,
@@ -5391,6 +6180,8 @@ class AppCore:
         return self.bridge_profile.recipient + (self.bridge_instance, self.bridge_generation)
 
     def _invalidate_bridge_review(self):
+        if self._guard_owner() is self and self.guard_route and len(self.guard_route) == 3:
+            self._drop_guard_client()
         if self.review_state == "TAKE_PENDING" and self.pending_take is not None:
             # Bridge loss during a pending take: discard locally (restore prior state,
             # devalue the nonce); a bridge-committed TAKEN is never rolled back and a
@@ -5428,6 +6219,7 @@ class AppCore:
 
     def connect_profile(self, profile):
         check_profile(profile)
+        require(not self.management_only or profile.mode == "REMOTE", "invalid_bridge_mode")
         same_recipient = self.bridge_profile is not None and self.bridge_profile.recipient == profile.recipient
         self.disconnect_bridge()
         if not same_recipient:
@@ -5444,7 +6236,7 @@ class AppCore:
         self.certificate_warning = False
         self.worker_id += 1
         self.bridge_worker = BridgeWorker(profile, self.preferences, self.worker_id,
-                                          self.bridge_cursor, not self.inbox)
+                                          self.bridge_cursor, not self.inbox, status_only=self.management_only)
 
     def reconnect_bridge(self):
         require(self.bridge_profile is not None, "no_previous_connection")
@@ -5463,11 +6255,11 @@ class AppCore:
         self.chat_binding_error = None
         self.bridge_state, self.bridge_error = "CONNECTING", None
         self.bridge_worker = BridgeWorker(self.bridge_profile, self.preferences, self.worker_id,
-                                          self.bridge_cursor, not self.inbox)
+                                          self.bridge_cursor, not self.inbox, status_only=self.management_only)
 
     def connect_local_bridge(self):
         self.disconnect_bridge()
-        process = LocalBridgeProcess()
+        process = LocalBridgeProcess(self.preference_store.directory if self.preference_store else None)
         try:
             self.connect_profile(process.profile)
         except BaseException:
@@ -5504,6 +6296,10 @@ class AppCore:
         self.recovery_started = True
         self.recovery_error = None
         saved = self.saved_connection
+        if saved and self.management_only:
+            saved = dict(saved, tunnel=None)
+        elif saved and self.service_location("mcp") == "LOCAL":
+            saved = dict(saved, profile=None, qrexec=None)
         if not saved or not (saved.get("profile") or saved.get("tunnel")):
             return
         if not automatic:
@@ -5594,15 +6390,16 @@ class AppCore:
                 self.recovery_state = "RESTORED"
                 self.recovery_deadline = None
                 self.recovery_watch_at = now + 1
-                if self.bridge_profile.mode == "REMOTE":
+                if self.bridge_profile.mode == "REMOTE" and not self.management_only:
                     self.recovery_chat_recipient = self.bridge_profile.recipient
-                if self.bridge_profile.mode == "REMOTE" and self.remote_tunnel_probe is None:
+                if self.bridge_profile.mode == "REMOTE" and not self.management_only and self.remote_tunnel_probe is None:
                     self.begin_tunnel_probe()
             elif self.bridge_state == "BLOCKED" or self.local_setup_state == "FAILED":
                 self._recovery_failure(self.bridge_error or self.local_setup_error)
             elif self.recovery_deadline is not None and now >= self.recovery_deadline:
                 self._recovery_failure("network_timeout")
-        elif (self.recovery_state == "RESTORED" and (self.saved_connection or {}).get("qrexec")
+        elif (self.recovery_state == "RESTORED" and self.service_location("mcp") == "REMOTE"
+              and (self.saved_connection or {}).get("qrexec")
               and self.recovery_target == self._saved_recovery_target() and now >= self.recovery_watch_at):
             self.recovery_watch_at = now + 1
             if self.bridge_state in {"RETRYING", "BLOCKED"}:
@@ -5708,11 +6505,17 @@ class AppCore:
         self.chat_binding_error = None
         self.chat_binding_notice = None
 
-    def pair_remote(self, url, pin, code):
+    def pair_remote(self, url, pin, code, *, via_qrexec=None):
         """Synchronous headless setup action; no terminal or review side effects."""
         require(self.connection_store is not None, "connection_store_required")
         normalized_pin = re.sub(r"[\s:-]", "", bounded_string(pin, 128)).lower()
         provisional = ConnectionProfile(url.rstrip("/"), normalized_pin, "0" * 32, "0" * 32, "0" * 64)
+        saved = self.connection_store.load_connection() or {}
+        qrexec = saved.get("qrexec") if via_qrexec is None else self.qrexec if via_qrexec else None
+        if qrexec and self.qrexec_forwarder.running:
+            require(self.qrexec_forwarder.target == qrexec["target"]
+                    and self.qrexec_forwarder.remote_port == qrexec["port"], "saved_connection_mismatch")
+            provisional = replace(provisional, forward_port=self.qrexec_forwarder.port)
         client = BridgeHTTP(provisional)
         claim = client.request("POST", "/v1/pair/claim",
                                {"code": bounded_string(code, 16), "request_id": uuid.uuid4().hex}, authenticate=False)
@@ -5720,21 +6523,19 @@ class AppCore:
         require(type(claim["version"]) is int and claim["version"] == 1 and claim["state"] == "PAIR_PENDING", "pair_schema")
         profile = replace(provisional, conversation=claim["conversation"], controller_id=claim["controller_id"], token=claim["token"])
         check_profile(profile)
-        saved = self.connection_store.load_connection()
-        self.connection_store.save_connection(profile, saved["tunnel"] if saved else None,
-                                              saved.get("qrexec") if saved else None)
+        self.connection_store.update_connection(profile=profile, qrexec=qrexec)
         # Save before confirm. On lost confirm response, connect_saved_bridge recovers
         # idempotently with this exact already-pinned credential, no code reuse.
         validate_status(BridgeHTTP(profile).request("POST", "/v1/pair/confirm", {"version": 1}), profile)
         return profile
 
-    def begin_pair_remote(self, url, pin, code):
+    def begin_pair_remote(self, url, pin, code, *, via_qrexec=None):
         require(self.pair_thread is None or not self.pair_thread.is_alive(), "pair_already_running")
         self.disconnect_bridge()
         self.bridge_state = "PAIRING"
         def run():
             try:
-                result = self.pair_remote(url, pin, code)
+                result = self.pair_remote(url, pin, code, via_qrexec=via_qrexec)
                 self.pair_events.put_nowait(("paired", result))
             except Exception as exc:
                 reason = str(exc) if isinstance(exc, ProbeError) else "pair_failed"
@@ -5745,10 +6546,7 @@ class AppCore:
     def configure_tunnel(self, binary, tunnel_id, api_key):
         require(self.connection_store is not None, "connection_store_required")
         config = {"binary": binary, "tunnel_id": tunnel_id, "api_key": api_key}
-        saved = self.connection_store.load_connection()
-        profile = ConnectionProfile(**saved["profile"]) if saved and saved["profile"] else None
-        self.connection_store.save_connection(profile, config, saved.get("qrexec") if saved else None)
-        self.saved_connection = self.connection_store.load_connection()
+        self.saved_connection = self.connection_store.update_connection(tunnel=config)
 
     def start_qrexec_forwarder(self, target, port=8443):
         """M9: start Main's own forwarder only. The dom0 policy line is produced for
@@ -5759,10 +6557,9 @@ class AppCore:
         target = validate_qube_name(target)
         self.qrexec_forwarder.start(target, port)
         self.qrexec = {"target": target, "port": int(port)}
-        saved = self.connection_store.load_connection()
-        profile = ConnectionProfile(**saved["profile"]) if saved and saved["profile"] else None
-        self.connection_store.save_connection(profile, saved["tunnel"] if saved else None, self.qrexec)
-        self.saved_connection = self.connection_store.load_connection()
+        saved = self.connection_store.load_connection() or {}
+        if not saved.get("profile") or saved.get("qrexec") == self.qrexec:
+            self.saved_connection = self.connection_store.update_connection(qrexec=self.qrexec)
 
     def stop_qrexec_forwarder(self):
         if self.recovery_preparation is not None:
@@ -5831,7 +6628,8 @@ class AppCore:
             return {"phase": str(exc), "reachable": False, "observed_pin": None}
         saved = self.saved_connection or {}
         record = saved.get("profile")
-        if record and record["url"].rstrip("/") == url and record["pin"]:
+        if (record and record["url"].rstrip("/") == url and record["pin"]
+                and saved.get("qrexec") in (None, {"target": target, "port": port})):
             # A changed certificate is evidenced here; silent trust is impossible.
             if not hmac.compare_digest(record["pin"], observed):
                 self._qrexec_note("reachability-probe", "pin_mismatch", None,
@@ -5850,7 +6648,7 @@ class AppCore:
         only the strict contract state pairing_required/already_paired."""
         try:
             parsed = urlsplit(url)
-            qrexec = (self.saved_connection or {}).get("qrexec")
+            qrexec = self.qrexec or (self.saved_connection or {}).get("qrexec")
             forwarder = self.qrexec_forwarder
             routed = (qrexec and parsed.hostname == "127.0.0.1" and parsed.port == qrexec["port"]
                       and (forwarder.target, forwarder.remote_port) == (qrexec["target"], qrexec["port"])
@@ -5962,10 +6760,7 @@ class AppCore:
             if failure:
                 self.local_setup_error = failure
             if self.tunnel.state == "READY" and polling:
-                saved = self.connection_store.load_connection()
-                remote = ConnectionProfile(**saved["profile"]) if saved and saved["profile"] else None
-                self.connection_store.save_connection(remote, self.local_pending)
-                self.saved_connection = self.connection_store.load_connection()
+                self.saved_connection = self.connection_store.update_connection(tunnel=self.local_pending)
                 self.local_pending = None
                 self.local_setup_state, self.local_setup_error = "CONNECTED", None
         except ProbeError as exc:
@@ -6063,6 +6858,8 @@ class AppCore:
                                   "Beleg: Bridge hat claim/confirm akzeptiert; Profil-Pin gebunden",
                                   "Chat-Code bewusst binden; keine automatische Freigabe")
             elif kind == "pair_error" and self.bridge_state == "PAIRING":
+                if self.management_only:
+                    self.saved_connection = self.connection_store.load_connection()
                 self.bridge_state, self.bridge_error = "BLOCKED", value
                 self._qrexec_note("pairing", str(value), None,
                                   "Belegt: Kopplung fehlgeschlagen; Grund oben, keine Codes in Logs",
@@ -6081,7 +6878,7 @@ class AppCore:
                     self.bridge_generation += 1
                     self.bridge_instance = value
                     self.bridge_state, self.bridge_error = "CONNECTED", None
-                    if self.bridge_profile.mode == "REMOTE":
+                    if self.bridge_profile.mode == "REMOTE" and not self.management_only:
                         self.begin_tunnel_probe()
                     # A queued item remains locally unreviewed; new review binds anew.
                 elif kind == "disconnected":
@@ -6199,14 +6996,15 @@ class AppCore:
 
     def start_local(self, workdir):
         require(self.endpoint is None, "session_already_started")
-        self.endpoint = LocalEndpoint(workdir)
+        self.endpoint = LocalEndpoint(Path.home() if self.terminal_home else workdir)
+        self.terminal_start_directory = str(Path(workdir).resolve())
         self.last_error = None
         self.connection = "WAITING_FOR_TERMINAL"
         return str(self.endpoint.directory)
 
     def restart_local(self):
         require(self.connection == "DISCONNECTED", "terminal_not_disconnected")
-        workdir = self.endpoint.workdir if self.endpoint else os.getcwd()
+        workdir = self.terminal_start_directory or os.getcwd()
         if self.endpoint:
             self.endpoint.close()
             self.endpoint = None
@@ -6216,6 +7014,17 @@ class AppCore:
         self.output_mode = "CLIPBOARD"
         self.last_error = None
         return self.start_local(workdir)
+
+    def set_terminal_home(self, enabled):
+        require(type(enabled) is bool, "invalid_preferences")
+        workdir = str(Path.home()) if enabled else self.terminal_start_directory
+        if self.connection == "WAITING_FOR_TERMINAL":
+            require(workdir is not None and Path(workdir).is_dir(), "invalid_workdir")
+        if self.preference_store is not None:
+            self.preference_store.save_terminal_home(enabled)
+        self.terminal_home = enabled
+        if self.connection == "WAITING_FOR_TERMINAL":
+            self.endpoint.workdir = workdir
 
     def helper_argv(self):
         require(self.endpoint is not None, "no_endpoint")
@@ -6679,18 +7488,22 @@ class AppCore:
         if self.bridge_worker and self.bridge_state == "CONNECTED":
             self.bridge_worker.post("preferences", value)
 
-    def set_final_return(self, value):
+    def set_final_return(self, value, *, update_review=True):
         require(type(value) is bool, "invalid_return_preference")
-        require(self.review_state not in {"CHECKING", "TRANSFERRING", "TAKE_PENDING"}, "transfer_in_progress")
+        if update_review:
+            require(self.review_state not in {"CHECKING", "TRANSFERRING", "TAKE_PENDING"}, "transfer_in_progress")
         if self.preference_store:
             self.preference_store.save(value, self.preferences)
         self.final_return = value
-        if self.review and self.review.direction == "TO_TERMINAL" and self.review.command_target == "TERMINAL" \
+        if update_review and self.review and self.review.direction == "TO_TERMINAL" and self.review.command_target == "TERMINAL" \
                 and self.review_state in {"REVIEW", "OVERRIDE_REQUIRED"}:
             return self.edit_review(self.review.id, self.review.text, value)
 
     def pump(self):
         try:
+            if self.remote_management is not None:
+                self.remote_management.pump()
+                self._sync_remote_mcp()
             self._pump_local_setup()
             self._pump_bridge()
             self._pump_connection_recovery()
@@ -6793,10 +7606,12 @@ class AppCore:
             self.review_state = "STALE"
 
     def close(self):
-        if self.risk_setup:
-            self.risk_setup.close()
+        self.guard_closed = True
+        if self.remote_management is not None:
+            self.remote_management.close()
+            self.remote_management = None
+        self._drop_guard_client()
         self.risk_requested = False
-        self.risk_setup_pending = None
         self._command_risk.close()
         self.qrexec_forwarder.stop()  # only Main's own forwarder; foreign processes untouched
         self.disconnect_bridge()
@@ -7102,17 +7917,20 @@ def local_setup_summary(core):
 
 class ConnectionDialog:
     """One contextual setup window; all operations use existing local core actions."""
-    def __init__(self, ui):
-        self.ui, self.core = ui, ui.core
+    def __init__(self, ui, *, management=False):
+        self.ui, self.management = ui, management
+        self.core = ui.core.remote_connection() if management else ui.core
         self.tk, self.ttk = ui.tk, ui.ttk
         if self.core.connection_store is not None:
             # Also recover a protected claim saved while the settings window was closed.
             self.core.saved_connection = self.core.connection_store.load_connection()
         self.window = self.tk.Toplevel(ui.root)
-        self.window.title(tr("AI / MCP — Verbindung einrichten"))
-        self.window.geometry("%dx%d" % (min(860, ui.root.winfo_screenwidth() - 40),
-                                       min(780, ui.root.winfo_screenheight() - 80)))
-        self.window.minsize(640, 480)
+        self.window.title(tr("Externe Bridge · Allgemein") if management else tr("AI / MCP · Einrichtung & Einstellungen"))
+        self.window.transient(ui.root)
+        self.wizard_size = "%dx%d" % (min(860, ui.root.winfo_screenwidth() - 40),
+                                     min(780, ui.root.winfo_screenheight() - 80))
+        self.window.geometry(self.wizard_size)
+        self.window.minsize(640, 340 if management else 480)
         self.window.columnconfigure(0, weight=1)
         self.window.rowconfigure(1, weight=1)
         self.busy = False
@@ -7137,7 +7955,8 @@ class ConnectionDialog:
         self.last_diagnostic = None
         saved = self.core.saved_connection or {"profile": None, "tunnel": None}
         profile = saved["profile"] or {}
-        self.recovery_overview = bool(saved.get("profile") or saved.get("tunnel")) and self.core.bridge_state != "CONNECTED"
+        self.recovery_overview = bool(profile) if management else bool(saved.get("tunnel") and
+            self.core.service_location("mcp") == "LOCAL" and self.core.bridge_state != "CONNECTED")
         # M9: three explicit connection kinds; Qrexec appears only on real Qubes,
         # remote HTTPS stays available everywhere (also on Qubes).
         self.qubes = qubes_detected()
@@ -7149,6 +7968,9 @@ class ConnectionDialog:
                                          active.mode if active else
                                          "QREXEC" if self.qubes and saved.get("qrexec") else
                                          "REMOTE" if profile else "CARD")
+        if (not management and active is None and self.core.local_setup_state == "IDLE"
+                and self.core.service_location("mcp") == "LOCAL"):
+            self.location.set("LOCAL" if saved.get("tunnel") or "mcp" in self.core.locations else "CARD")
         self.compared = self.tk.BooleanVar(master=self.window, value=False)
         base = self.ttk.Style(self.window).lookup("TFrame", "background") or self.window.cget("background")
         self.canvas = self.tk.Canvas(self.window, highlightthickness=0, background=base)
@@ -7187,21 +8009,18 @@ class ConnectionDialog:
         self.bridge_section = bridge_section = self.section(2, tr("1 · Bridge-Einrichtung"))
         bridge_section.columnconfigure(0, weight=1)
         self.wizard_index = 0
+        self.wizard_mode = self.location.get()
         self.cards = self.ttk.Frame(bridge_section)
         self.cards.columnconfigure(0, weight=1)
         self.location_buttons = []
-        card_choices = [("LOCAL", tr("1 · Direkt lokal – einfachster Weg"),
-                         tr("Bridge wird vom Hauptprogramm auf demselben System gestartet.\nGeringe Isolation und wenige Abhängigkeiten dort; keine\nNetzwerk-Konfiguration nötig.")),
-                        ]
-        if self.qubes:
-            card_choices.append(("QREXEC", tr("2 · Anderes Qube – geführt einrichten (Qubes OS)"),
-                                 tr("Die Bridge läuft in einem getrennten Qube, erreichbar über\nqrexec. AITL führt gemeinsam durch Startbefehl, Verbindung und\nHallo-Kopplung – dom0-Freigaben bleiben manuell bei dir.")))
-        card_choices.append(("REMOTE", tr("3 · Externe Bridge (z. B. LAN-Rechner/Gateway)"),
-                             tr("Bridge läuft auf einem anderen Rechner; Verbindung über das\nbestehende sichere HTTPS-Pin-Verfahren. Nur HTTPS – keine\nunverschlüsselte HTTP-Abschwächung.")))
-        for index, (value, title, description) in enumerate(card_choices):
-            button = self.ttk.Radiobutton(self.cards, text="%s\n\n%s" % (title, description),
-                                          variable=self.location, value=value,
-                                          padding=12, command=self.select_location)
+        if management:
+            card_choices = ([("QREXEC", tr("Verbindung im Ziel-Qube einrichten"))] if self.qubes else [])
+            card_choices.append(("REMOTE", tr("Über HTTPS verbinden")))
+        else:
+            card_choices = [("LOCAL", tr("Auf diesem Rechner")), ("REMOTE", tr("Über die externe Bridge"))]
+        for index, (value, title) in enumerate(card_choices):
+            button = self.ttk.Radiobutton(self.cards, text=title, variable=self.location, value=value,
+                                          padding=12, command=self.choose_location)
             button.grid(row=index, column=0, sticky="ew", pady=5)
             self.location_buttons.append(button)
         self.label(self.cards, len(card_choices),
@@ -7437,7 +8256,7 @@ class ConnectionDialog:
                    "Kein App-Key oder Admin-Key. Auch dessen Benutzer benötigt Read + Use. Die App findet/installiert "
                    "den Client und richtet die lokale Verbindung automatisch ein. Den Tunnel der richtigen Platform-"
                    "Organisation und dem gewünschten ChatGPT-Workspace zuordnen."))
-        config = saved["tunnel"] or {}
+        config = {} if management else saved["tunnel"] or {}
         self.entry(self.local_inputs, 1, "tunnel_id", tr("Tunnel-ID"), config.get("tunnel_id", ""))
         self.entry(self.local_inputs, 2, "api_key", "Runtime API key", config.get("api_key", ""), secret=True)
         self.button(self.local_inputs, 3, "tunnel_help", tr("Tunnel-ID beschaffen · OpenAI Platform"), "tunnel",
@@ -7500,8 +8319,13 @@ class ConnectionDialog:
         self.summary_label = self.ttk.Label(footer, textvariable=self.summary, justify="left", wraplength=540)
         self.summary_label.grid(row=1, column=0, sticky="ew")
         self.ttk.Button(footer, text=tr("Schließen"), command=self.window.destroy).grid(row=1, column=1, padx=(12, 0))
-        self.ttk.Label(footer, text=tr("Schließen lässt laufende Verbindungen bestehen.")).grid(
-            row=2, column=0, columnspan=2, sticky="w", pady=(6,0))
+        if not management:
+            self.ttk.Label(footer, text=tr("Schließen lässt laufende Verbindungen bestehen.")).grid(
+                row=2, column=0, columnspan=2, sticky="w", pady=(6,0))
+        self.remote_required = self.ttk.Frame(bridge_section)
+        self.label(self.remote_required, 0, tr("Zuerst die externe Bridge koppeln."))
+        self.ttk.Button(self.remote_required, text=tr("Externe Bridge einrichten"),
+            command=lambda: self.ui.open_bridge_management("mcp")).grid(row=1, column=0, sticky="w", pady=6)
         self.simplify_connection_pages()
         self.location.trace_add("write", lambda *_: self.select_location())
         for key in ("url", "remote_python", "remote_script", "remote_state", "remote_bind"):
@@ -7528,7 +8352,7 @@ class ConnectionDialog:
                 if isinstance(widget, self.ttk.Label) and int(widget.grid_info().get("row", -1)) == row:
                     widget.configure(text=text)
                     return
-        copy(self.cards, len(self.location_buttons), tr("Wähle den Standort der Bridge. Gespeicherte Verbindungen werden beim App-Start wiederhergestellt."))
+        copy(self.cards, len(self.location_buttons), tr("Die Kopplung gilt für alle Dienste auf dieser Bridge.") if self.management else "")
         for widget in self.q2.winfo_children():
             if isinstance(widget, self.ttk.Checkbutton) and str(widget.cget("variable")) == str(self.q2_tunnel_open):
                 widget.grid_remove()
@@ -7548,7 +8372,7 @@ class ConnectionDialog:
         copy(self.q4, 1, tr("Vor „Koppeln und speichern“ den vollständigen Fingerprint mit der SPKI-Zeile im Ziel-Terminal vergleichen. Dein Klick bestätigt den Vergleich; spätere Zertifikatswechsel werden blockiert."))
         copy(self.qrexec_tunnel_page, 0, tr("Die Bridge ist gekoppelt. Jetzt mit OpenAI verbinden: Tunnel-ID und Runtime Key eingeben. Der Tunnel läuft im Ziel-Qube; die Werte werden über die geprüfte Verbindung dorthin übertragen."))
         copy(self.qrexec_tunnel_page, 4, tr("Der Runtime Key wird nur an der Bridge geschützt gespeichert und nach der Übertragung hier geleert. Den offiziellen Client richtet die Bridge unter Linux bei Bedarf ein. Der Status aktualisiert sich automatisch."))
-        copy(self.remote_setup, 0, tr("Bridge und Tunnel laufen auf einem anderen Rechner. Adresse und Pfade prüfen, dort den Startbefehl ausführen und anschließend die Verbindung testen."))
+        copy(self.remote_setup, 0, tr("Adresse und Pfade prüfen, den Startbefehl auf dem Bridge-Rechner ausführen und die Verbindung testen."))
         copy(self.remote_tunnel_page, 0, tr("Die Bridge ist gekoppelt. Die beiden Platform-Werte richten den Secure Tunnel am Bridge-Standort ein."))
         copy(self.local_inputs, 0, tr("In der OpenAI Platform: Tunnel-ID erstellen und einen Restricted Runtime API key mit Tunnels Read + Use anlegen. Verwende die Organisation und den Workspace des gewünschten Chats."))
         copy(self.chat_section, 0, tr("Diesen Chat-Code nur im gewünschten AI-Chat mitteilen. Er gilt 24 Stunden und erlaubt zusammen mit dem MCP-Zugriff den Abruf freigegebener Ausgaben."))
@@ -7582,15 +8406,22 @@ class ConnectionDialog:
     def open_recovery_setup(self):
         saved = self.core.saved_connection or {}
         mode = "QREXEC" if saved.get("qrexec") and self.qubes else "REMOTE" if saved.get("profile") else "LOCAL"
+        if not self.management:
+            mode = self.core.service_location("mcp")
         self.location.set(mode)
-        self.wizard_goto(1 if mode == "QREXEC" else 0)
+        self.wizard_goto(1 if self.management and mode == "QREXEC" else 0)
+        if self.management:
+            self.window.geometry(self.wizard_size)
 
     def retry_recovery(self):
         # Repaint before synchronous preparation/cleanup; a fast repeated error
         # remains distinguishable afterwards through the attempt number.
         self.recovery_notice.set(tr("Gespeicherte Verbindung wird erneut gestartet …"))
         self.window.update_idletasks()
-        self.core.retry_connection_recovery()
+        if not self.management and self.core.service_location("mcp") == "REMOTE":
+            self.core.select_mcp_location("REMOTE")
+        else:
+            self.core.retry_connection_recovery()
 
     def render_connection_layers(self, bridge):
         saved = self.core.saved_connection or {}
@@ -7635,6 +8466,15 @@ class ConnectionDialog:
         attempt_status = recovery_attempt_status(self.core)
         if attempt_status:
             notice = attempt_status + "\n" + notice
+        if self.management:
+            site, state = self.ui.core.external_bridge_status()
+            self.connection_path.set(tr("Externe Bridge") + (" · " + site if site else ""))
+            self.layer_labels["Bridge"].configure(text=state)
+            for key in ("Secure Tunnel", "Chat"):
+                self.layer_labels[key].grid_remove()
+            self.summary.set("")
+            if connected:
+                notice = tr("Die Kopplung gilt für alle Dienste auf dieser Bridge.")
         self.recovery_notice.set(notice)
         # Secondary controls appear only where they have a useful effect.
         for key, visible in (("qrexec_stop", self.core.qrexec_forwarder.running),
@@ -7651,8 +8491,13 @@ class ConnectionDialog:
         for variable in (*self.fields.values(), self.location, self.compared, self.details):
             for mode, command in variable.trace_info():
                 variable.trace_remove(mode, command)
+        if self.ui.bridge_dialog is self:
+            self.ui.bridge_dialog = None
+            self.ui.bridge_return_to = None
         if self.ui.connection_dialog is self:
             self.ui.connection_dialog = None
+            if self.ui.bridge_return_to == "mcp":
+                self.ui.bridge_return_to = None
 
     def section(self, row, title):
         frame = self.ttk.LabelFrame(self.content, text=title, padding=12)
@@ -7836,23 +8681,26 @@ class ConnectionDialog:
         return self.core.pair_thread is not None and self.core.pair_thread.is_alive()
 
     WIZARD_TITLES = {
-        "LOCAL": (tr("Lokale Bridge und Tunnel"), tr("Chat binden und verwalten")),
-        "QREXEC": (tr("Ziel-Qube"), tr("Bridge starten und verbinden"), tr("Bewusst koppeln"),
-                   tr("Tunnel am Ziel-Qube verbinden"), tr("Chat binden und verwalten")),
-        "REMOTE": (tr("Bridge-Standort und Startbefehl"), tr("Prüfen, Code anfordern und koppeln"),
-                   tr("Tunnel am Gateway verbinden"), tr("Chat binden und verwalten")),
+        "LOCAL": ("Lokale Bridge und Tunnel", "Chat binden und verwalten"),
+        "QREXEC": ("Ziel-Qube", "Bridge starten und verbinden", "Bewusst koppeln",
+                   "Tunnel am Ziel-Qube verbinden", "Chat binden und verwalten"),
+        "REMOTE": ("Bridge-Standort und Startbefehl", "Prüfen, Code anfordern und koppeln",
+                   "Tunnel am Gateway verbinden", "Chat binden und verwalten"),
     }
     QREXEC_IDLE_TEXT = (tr("Noch nicht geprüft. Starte die Bridge im Ziel-Qube und klicke anschließend auf Verbindung prüfen."))
 
     def wizard_titles(self, mode):
-        return self.WIZARD_TITLES.get(mode, ())
+        titles = tuple(tr(title) for title in self.WIZARD_TITLES.get(mode, ()))
+        if mode in ("QREXEC", "REMOTE"):
+            return titles[:-2] if self.management else titles[-2:]
+        return titles
 
     def wizard_pages(self, mode=None):
         mode = mode or self.location.get()
         if mode == "QREXEC":
-            return self.qrexec_panel, [self.q1, self.q2, self.q4, self.qrexec_tunnel_page]
+            return self.qrexec_panel, [self.q1, self.q2, self.q4] if self.management else [self.qrexec_tunnel_page]
         if mode == "REMOTE":
-            return self.remote, [self.remote_setup, self.remote_pair, self.remote_tunnel_page]
+            return self.remote, [self.remote_setup, self.remote_pair] if self.management else [self.remote_tunnel_page]
         if mode == "LOCAL":
             return self.local, [self.local]
         return self.cards, [self.cards]
@@ -7862,24 +8710,42 @@ class ConnectionDialog:
         # Geschwister-Abschnitte (Tunnel-Umgebung, Chat/Verwalten) gehören zu
         # konkreten Schritten – keine dauerhaft angehängten Blöcke.
         mode = self.location.get()
-        for frame in (self.cards, self.local, self.remote, self.qrexec_panel):
+        for frame in (self.cards, self.local, self.remote, self.qrexec_panel, self.remote_required,
+                      self.q1, self.q2, self.q4, self.qrexec_tunnel_page,
+                      self.remote_setup, self.remote_pair, self.remote_tunnel_page):
             frame.grid_remove()
         for section in (self.bridge_section, self.tunnel_section, self.chat_section,
                         self.controls, self.details_button):
             section.grid_remove()
         self.local_tunnel.grid() if mode == "LOCAL" else self.local_tunnel.grid_remove()
         if self.recovery_overview:
-            self.intro.configure(text=tr("Gespeicherte Einrichtung weiterverwenden. Eine neue Kopplung ist normalerweise nicht nötig."))
+            self.intro.configure(text=tr("Die Kopplung gilt für alle Dienste auf dieser Bridge.") if self.management
+                                 else tr("Gespeicherte Einrichtung weiterverwenden. Eine neue Kopplung ist normalerweise nicht nötig."))
             self.wizard_step.set(tr("Gespeicherte Verbindung"))
             self.buttons["wizard_next"].grid_remove()
+            if self.management:
+                self.intro.grid_remove()
+                self.navigation.grid_remove()
+                self.window.geometry("700x340")
             return
+        self.intro.grid()
+        self.navigation.grid()
         if mode == "CARD":
             self.bridge_section.grid()
             self.cards.grid(row=0, column=0, sticky="ew")
-            self.buttons["wizard_next"].grid()
-            self.bridge_section.configure(text=tr("Wo soll die Bridge laufen?"))
+            self.buttons["wizard_next"].grid_remove()
+            self.bridge_section.configure(text=tr("Verbindungsweg auswählen") if self.management
+                                          else tr("Wo soll der Secure MCP Tunnel laufen?"))
             self.wizard_step.set(tr("Standort auswählen"))
             self.refresh_qubes_diagnostics()
+            return
+        if not self.management and mode in ("REMOTE", "QREXEC") and not self.core.saved_remote().get("profile"):
+            self.bridge_section.configure(text=tr("Externe Bridge"))
+            self.bridge_section.grid()
+            self.remote_required.grid(row=0, column=0, sticky="ew")
+            self.buttons["wizard_next"].grid_remove()
+            self.wizard_step.set(tr("Standort auswählen"))
+            self.intro.configure(text="")
             return
         titles = self.wizard_titles(mode)
         if titles:
@@ -7892,11 +8758,13 @@ class ConnectionDialog:
                         "QREXEC": tr("Ziel-Qube festlegen; anschließend Bridge starten und die Verbindung prüfen."),
                         "REMOTE": tr("Bridge am gewählten Standort starten und die Verbindung prüfen.")}
         self.intro.configure(text=instructions.get(mode, tr("Verbindung einrichten.")))
-        if index == len(titles)-1:
+        if self.management:
+            self.intro.configure(text=tr("Die Kopplung gilt für alle Dienste auf dieser Bridge."))
+        elif index == len(titles)-1:
             self.intro.configure(text=tr("Letzter Schritt: den gewünschten Chat bewusst mit dieser Verbindung binden."))
         elif index == len(titles)-2 and mode != "LOCAL":
             self.intro.configure(text=tr("Secure Tunnel am Bridge-Standort mit OpenAI verbinden."))
-        if mode in ("LOCAL", "QREXEC", "REMOTE") and index == len(titles) - 1:
+        if not self.management and mode in ("LOCAL", "QREXEC", "REMOTE") and index == len(titles) - 1:
             if mode == "LOCAL":
                 # Der lokale Tunnel-Status/Diagnoseblock gehört zur letzten Seite.
                 self.tunnel_section.configure(text="2 · OpenAI Secure MCP Tunnel")
@@ -7951,6 +8819,8 @@ class ConnectionDialog:
 
     def wizard_can_advance(self):
         mode, index = self.location.get(), self.wizard_index
+        if not self.management and mode in ("REMOTE", "QREXEC"):
+            return index == 0 and self.core.bridge_state == "CONNECTED" and (self.core.remote_tunnel or {}).get("phase") == "connected"
         if mode == "QREXEC":
             return (index == 0 or index == 1 and self.qrexec_verified
                     or index == 2 and self.core.bridge_state == "CONNECTED"
@@ -7967,7 +8837,7 @@ class ConnectionDialog:
         titles = self.wizard_titles(mode)
         if not self.wizard_can_advance():
             return
-        if mode == "QREXEC" and self.wizard_index == 0:
+        if self.management and mode == "QREXEC" and self.wizard_index == 0:
             try:
                 validate_qube_name(self.fields["qrexec_target"].get())
                 self.qrexec_port()
@@ -8026,8 +8896,16 @@ class ConnectionDialog:
             box.frame.grid() if opened.get() else box.frame.grid_remove()
             box.show(((text, "plain"),))
 
+    def choose_location(self):
+        mode = self.location.get()
+        if not self.management and (mode == "LOCAL" or self.core.saved_remote().get("profile")):
+            self.run("bridge", lambda: self.core.select_mcp_location("LOCAL" if mode == "LOCAL" else "REMOTE"))
+        self.select_location()
+
     def select_location(self, *_):
         location = self.location.get()
+        if not self.management and location not in ("REMOTE", "QREXEC") and self.ui.bridge_return_to == "mcp":
+            self.ui.bridge_return_to = None
         if location != getattr(self, "wizard_mode", None):
             self.wizard_index = 0
             self.wizard_mode = location
@@ -8035,7 +8913,7 @@ class ConnectionDialog:
         card = location == "CARD"
         if not local:
             self.errors["tunnel"].set("")
-        self.intro.configure(text=tr("Bridge verbinden, Secure Tunnel einrichten, Chat bewusst binden.") if card else
+        self.intro.configure(text="" if card else
                              tr("Bridge und Secure Tunnel werden auf diesem System eingerichtet.") if local else
                              tr("Bridge am gewählten Standort einrichten. Die Fortschrittsanzeige zeigt, was bereits verbunden ist."))
         self.wizard_apply()
@@ -8159,7 +9037,19 @@ class ConnectionDialog:
         wechselt automatisch auf die Code-Seite; already_paired und alle Fehler
         bleiben mit Diagnose auf diesem Schritt (Retry ueber denselben Button).
         Kein Hintergrund-Hallo, kein extra Pflicht-Button."""
-        result = self.core.verify_qrexec_connection(self.fields["qrexec_target"].get(), self.qrexec_port())
+        target = validate_qube_name(self.fields["qrexec_target"].get())
+        port = self.qrexec_port()
+        forwarder = self.core.qrexec_forwarder
+        if forwarder.running and (forwarder.target, forwarder.remote_port) != (target, port):
+            # Stop users of the old loopback listener before pointing it at another Qube.
+            main = self.ui.core
+            if main.use_remote_mcp:
+                main.disconnect_bridge()
+                main.remote_mcp_binding = None
+            if main._guard_owner() is self.core:
+                main._drop_guard_client()
+            self.core.disconnect_bridge()
+        result = self.core.verify_qrexec_connection(target, port)
         phase = result["phase"]
         if not result["reachable"]:
             self.qrexec_verified = False
@@ -8289,7 +9179,8 @@ class ConnectionDialog:
                                tr("angezeigter SPKI wird als Profil-Pin fest gebunden; Code nicht protokolliert "
                                "(menschlicher Vergleich: Anzeige gegen Bridge-Konsole, Klick = Bestätigung)"),
                                tr("Nach erfolgreicher Kopplung ist die Bridge verbunden"))
-        self.core.begin_pair_remote(url, self.qrexec_observed_pin, code)
+        self.prepare_pairing()
+        self.core.begin_pair_remote(url, self.qrexec_observed_pin, code, via_qrexec=True)
         self.fields["qrexec_code"].set("")
         self.refresh_qubes_diagnostics()
 
@@ -8330,8 +9221,6 @@ class ConnectionDialog:
         Statusvalidierung). Ohne passende eigene Credentials bleibt es ein
         ehrlicher Status ohne Fortschritt – niemals ein Auth-Bypass und keine
         automatische Neukopplung."""
-        if self.core.bridge_state == "CONNECTED":
-            return tr("Die gespeicherte Bridge ist bereits authentifiziert verbunden.")
         if (self.core.bridge_state in {"CONNECTING", "PAIRING", "RETRYING"}
                 or self.core.recovery_preparation is not None or self.core.recovery_state == "WAITING"):
             return (tr("Die Bridge-Verbindung wird bereits aufgebaut; Ergebnis abwarten. "
@@ -8348,6 +9237,8 @@ class ConnectionDialog:
             return (tr("Die Bridge meldet eine bestehende Kopplung, aber auf diesem Rechner ist keine passende "
                     "gespeicherte Controller-Verbindung. Ohne eigene Credentials wird nichts übernommen – "
                     "bewusst neu koppeln (ersetzt die aktive Freigabe) ist der einzige Weg."))
+        if self.core.bridge_state == "CONNECTED":
+            return tr("Die gespeicherte Bridge ist bereits authentifiziert verbunden.")
         # Active states suppress duplicate clicks. A failed asynchronous attempt
         # must not leave a permanent per-dialog lock on this saved recipient.
         try:
@@ -8359,13 +9250,22 @@ class ConnectionDialog:
         return (tr("Bereits gekoppelt – die gespeicherte, gepinnte Controller-Verbindung wird wiederhergestellt "
                 "und echt authentifiziert; bei Erfolg führt der Assistent automatisch weiter."))
 
+    def prepare_pairing(self):
+        main = self.ui.core
+        if "mcp" not in main.locations:
+            main.set_service_location("mcp", main.service_location("mcp"))
+        previous = main.service_location("sh-guard")
+        if previous and "sh-guard" not in main.locations:
+            main.set_service_location("sh-guard", previous)
+
     def pair(self):
         # #90: remote branch likewise binds the displayed, human-compared SPKI;
         # the deliberate check action proved reachability and requested the code.
         require(self.remote_observed_pin, "bridge_not_verified")
         code = self.normalize_pair_code(self.fields["code"].get())
         require(re.fullmatch(r"[0-9A-HJKMNP-TV-Z]{8}", code), "pair_code_invalid")
-        self.core.begin_pair_remote(self.fields["url"].get().rstrip("/"), self.remote_observed_pin, code)
+        self.prepare_pairing()
+        self.core.begin_pair_remote(self.fields["url"].get().rstrip("/"), self.remote_observed_pin, code, via_qrexec=False)
         self.fields["code"].set("")
 
 
@@ -8399,7 +9299,10 @@ class ConnectionDialog:
         self.last_state = bridge.state
         local = self.location.get() == "LOCAL"
         ready = local and self.core.local_setup_state == "CONNECTED" and bridge.state == "CONNECTED" and bridge.tunnel_state == "READY"
-        if self.recovery_overview and bridge.state == "CONNECTED":
+        if bridge.state == "CONNECTED" and self.management and previous_state in ("PAIRING", "CONNECTING", "RETRYING"):
+            self.recovery_overview = True
+            self.wizard_apply()
+        elif self.recovery_overview and bridge.state == "CONNECTED" and not self.management:
             self.recovery_overview = False
             self.wizard_apply()
         self.summary.set(local_setup_summary(self.core) if local else connection_summary(bridge))
@@ -8422,7 +9325,7 @@ class ConnectionDialog:
         self.buttons["chat_copy"].grid() if visible else self.buttons["chat_copy"].grid_remove()
         self.buttons["chat_show"].grid_remove() if visible else self.buttons["chat_show"].grid()
         self.buttons["chat_rotate"].grid() if self.details.get() else self.buttons["chat_rotate"].grid_remove()
-        on_chat = self.location.get() != "CARD" and \
+        on_chat = not self.management and self.location.get() != "CARD" and \
             self.wizard_index == len(self.wizard_titles(self.location.get())) - 1
         if on_chat and not visible and bridge.state == "CONNECTED" and bridge.chat_binding is not None:
             # S5: entering the chat step shows the current code automatically ONCE
@@ -8445,7 +9348,7 @@ class ConnectionDialog:
         for key in ("remote_tunnel_id", "remote_runtime_key", "qrexec_tunnel_id", "qrexec_runtime_key"):
             self.entries[key].configure(state="disabled" if busy else "normal")
         location = self.location.get()
-        if location in ("REMOTE", "QREXEC"):
+        if not self.management and location in ("REMOTE", "QREXEC") and bridge.mode != "LOCAL":
             if bridge.state == "CONNECTED" and self.core.remote_tunnel is None \
                     and self.core.remote_tunnel_probe is None and not self.core.remote_tunnel_busy \
                     and self.probe_suppressed != bridge.instance:
@@ -8455,12 +9358,8 @@ class ConnectionDialog:
                     pass
             phase, detail = bridge.tunnel_phase, bridge.tunnel_detail or ""
             if bridge.state != "CONNECTED":
-                # 0.9.3: der Widerspruch „bereits gekoppelt“ vs. Gate ist aufgelöst –
-                # der Text benennt den echten Grund und den zulässigen Weg.
-                self.remote_tunnel_status.set(
-                    tr("Bridge ist nicht authentifiziert verbunden. „Verbindung prüfen“ stellt eine passende "
-                    "bereits gekoppelte, gepinnte Controller-Verbindung automatisch und echt authentifiziert "
-                    "wieder her; erst danach kann der Tunnel übertragen und beobachtet werden."))
+                self.remote_tunnel_status.set(tr("Verbindung zur externen Bridge wird aufgebaut.")
+                    if bridge.state == "CONNECTING" else tr("Externe Bridge offline. Die Verbindung lässt sich unten links im Hauptfenster verwalten."))
             elif self.probe_suppressed == bridge.instance and self.core.remote_tunnel is None:
                 pass  # the deliberate cancel notice stays visible until a new save/reconnect
             else:
@@ -8481,7 +9380,7 @@ class ConnectionDialog:
                          "connected": tr("Tunnel verbunden · Chat-Seite ist der nächste Schritt."),
                          "error": tr("Tunnel-Fehler: ") + self.error_text(detail)}.get(phase or "",
                                                                             tr("Tunnelstatus wird abgefragt …")))
-            form_needed = bridge.state != "CONNECTED" or phase in (None, "missing", "error")
+            form_needed = bridge.state == "CONNECTED" and phase in (None, "missing", "error")
             for form in (self.remote_tunnel_form, self.qrexec_tunnel_form):
                 form.grid() if form_needed else form.grid_remove()
             if self.was_tunnel_busy and not self.core.remote_tunnel_busy:
@@ -8913,6 +9812,7 @@ class ReviewUI:
         self.last_binding_review = None
         self.binding_touched = False
         self.launcher = None
+        self.terminal_dialog = None
         self.connection_dialog = None
         self.risk_details_box = None
         self.risk_summary_box = None
@@ -8921,7 +9821,9 @@ class ReviewUI:
         self.risk_render_key = None
         self.risk_settings_open = False
         self.text_settings_open = False
-        self.risk_setup_key = None
+        self.bridge_dialog = None
+        self.bridge_return_to = None
+        self.guard_pending_remote = False
         self.payload_details = None
         self.status_labels = []
         root.title("Admin in the Loop · v" + BRIDGE_SERVER_INFO["version"])
@@ -8942,13 +9844,17 @@ class ReviewUI:
         self.layout.grid(row=0, column=0, sticky="nsew")
         self.layout.rowconfigure(0, weight=1)
         language_bar = ttk.Frame(root)
-        language_bar.grid(row=1, column=0, sticky="e", padx=16, pady=(0, 6))
-        ttk.Label(language_bar, text=tr("Sprache / Language")).pack(side="left", padx=6)
+        language_bar.grid(row=1, column=0, sticky="ew", padx=16, pady=(0, 6))
+        self.bridge_button = ttk.Button(language_bar, command=self.open_bridge_management)
+        self.bridge_button.pack(side="left")
+        self.bridge_footer_status = tk.StringVar(master=root)
+        ttk.Label(language_bar, textvariable=self.bridge_footer_status).pack(side="left", padx=8)
         self.language_options = {"system": tr("Systemstandard"), "de": "Deutsch", "en": "English"}
         self.language = tk.StringVar(value=self.language_options[self.language_choice])
         self.language_picker = ttk.Combobox(language_bar, textvariable=self.language,
             values=tuple(self.language_options.values()), state="readonly", width=18)
-        self.language_picker.pack(side="left")
+        self.language_picker.pack(side="right")
+        ttk.Label(language_bar, text=tr("Sprache / Language")).pack(side="right", padx=6)
         self.language_picker.bind("<<ComboboxSelected>>", self.change_language)
         rgb = tuple(value // 256 for value in root.winfo_rgb(base))
         shift = -1 if sum(rgb) > 384 else 1
@@ -8981,18 +9887,25 @@ class ReviewUI:
             panel.rowconfigure(1, weight=1)
 
         self.terminal_status = tk.StringVar(value=tr("Nicht verbunden\n"))
-        self.terminal_button = self.header(left, "Terminal", self.terminal_status, tr("Terminal öffnen"), self.open_terminal,
-                                           "terminal")
+        self.terminal_settings_button, self.command_target_picker = self.header(
+            left, "Terminal", self.terminal_status, self.terminal_settings, "terminal", tr("Befehlsziel"))
+        self.command_target = tk.StringVar(value=ui_labels(COMMAND_TARGETS)[core.command_target])
+        self.command_target_picker.configure(textvariable=self.command_target, values=tuple(ui_labels(COMMAND_TARGETS).values()))
+        self.command_target_picker.bind("<<ComboboxSelected>>", self.change_command_target)
         left_space = ttk.Frame(left)
         left_space.grid(row=1, column=0, sticky="nsew")
-        output_controls = ttk.Frame(left)
-        output_controls.grid(row=2, column=0, sticky="ew", pady=(12, 4))
-        output_controls.columnconfigure(0, weight=1)
-        ttk.Label(output_controls, text=tr("Ausgabebereich"), anchor="center", justify="center").grid(
-            row=0, column=0, sticky="ew", pady=(0, 5))
+        left_space.columnconfigure(0, weight=1)
+        self.terminal_button = ttk.Button(left_space, text=tr("Terminal öffnen"), command=self.open_terminal)
+        self.terminal_button.grid(row=0, column=0, sticky="ew")
+        self.output_controls = ttk.Frame(left_space)
+        self.output_controls.grid(row=1, column=0, sticky="ew")
+        self.output_controls.columnconfigure(0, weight=1)
+        ttk.Label(self.output_controls, text=tr("Ausgabebereich"), anchor="center", justify="center").grid(
+            row=0, column=0, sticky="ew", pady=(0, 2))
         self.output_mode = tk.StringVar(value=ui_labels(OUTPUT_MODES)[core.output_mode])
-        self.output_picker = ttk.Combobox(output_controls, textvariable=self.output_mode,
-                                          state="readonly", width=20, justify="center")
+        self.output_picker = ttk.Combobox(self.output_controls, textvariable=self.output_mode,
+            values=tuple(label for mode, label in ui_labels(OUTPUT_MODES).items() if mode != "CLIPBOARD"),
+            state="readonly", width=20, justify="center")
         self.output_picker.grid(row=1, column=0, sticky="ew")
         self.output_picker.bind("<<ComboboxSelected>>", self.change_output_mode)
 
@@ -9085,25 +9998,20 @@ class ReviewUI:
         self.review_status_label.grid(row=5, column=0, sticky="ew", pady=(8, 4))
 
         self.ai_status = tk.StringVar(value=tr("Nicht verbunden\nLokaler Testmodus"))
-        self.header(right, "AI / MCP", self.ai_status,
-                    tr("Verbindung einstellen"), self.connection_settings, "ai")
+        self.ai_settings_button, self.provider_picker = self.header(
+            right, "AI / MCP", self.ai_status, self.connection_settings, "ai", tr("AI-Anbieter"))
+        self.provider_picker.configure(values=AI_PROVIDERS)
+        self.provider_picker.current(0)
+        self.provider_picker.bind("<<ComboboxSelected>>", self.change_ai_provider)
         right_space = ttk.Frame(right)
         right_space.grid(row=1, column=0, sticky="nsew")
         ttk.Label(right_space, text=tr("Command-Blockgröße"), anchor="center", justify="center").pack(
             fill="x", pady=(5, 2))
         self.preference = tk.StringVar(value=core.preferences)
-        preference = ttk.Combobox(right_space, textvariable=self.preference,
-                                  values=BLOCK_SIZES, state="readonly", width=12, justify="center")
-        preference.pack(fill="x")
-        preference.bind("<<ComboboxSelected>>", lambda _: self.action(lambda: core.set_preferences(self.preference.get())))
-        ttk.Label(right_space, text=tr("Ziel für AI-Vorschläge"), anchor="center", justify="center").pack(fill="x", pady=(6, 2))
-        self.command_target = tk.StringVar(value=ui_labels(COMMAND_TARGETS)[core.command_target])
-        self.command_target_picker = ttk.Combobox(right_space, textvariable=self.command_target,
-            values=tuple(ui_labels(COMMAND_TARGETS).values()), state="readonly", justify="center")
-        self.command_target_picker.pack(fill="x")
-        self.command_target_picker.bind("<<ComboboxSelected>>", lambda _: self.action(
-            lambda: core.set_command_target(next(key for key, label in ui_labels(COMMAND_TARGETS).items()
-                                                if label == self.command_target.get()))))
+        self.block_size_picker = ttk.Combobox(right_space, textvariable=self.preference,
+                                               values=BLOCK_SIZES, state="readonly", width=12, justify="center")
+        self.block_size_picker.pack(fill="x")
+        self.block_size_picker.bind("<<ComboboxSelected>>", lambda _: self.action(lambda: core.set_preferences(self.preference.get())))
         ttk.Separator(right_space, orient="horizontal").pack(fill="x", pady=(6, 6))
         ttk.Label(right_space, text=tr("Chat-Code"), anchor="center", justify="center",
                   font=("TkDefaultFont", 10, "bold")).pack(fill="x", pady=(0, 4))
@@ -9177,7 +10085,7 @@ class ReviewUI:
         self.messagebox.showinfo(tr("Sprache / Language"),
             tr("Sprache gespeichert. Die Änderung gilt nach dem nächsten App-Start."), parent=self.root)
 
-    def header(self, panel, title, status, button_text, command, section):
+    def header(self, panel, title, status, settings_command, section, selector_label):
         frame = self.ttk.Frame(panel)
         frame.grid(row=0, column=0, sticky="ew")
         frame.columnconfigure(0, weight=1)
@@ -9192,13 +10100,17 @@ class ReviewUI:
             graphic.grid(row=0, column=0, pady=(0, 4))
             self.section_logo_labels[section] = graphic
         self.ttk.Label(frame, text=title, font=("TkDefaultFont", 11, "bold"),
-                       anchor="center", justify="center").grid(row=1, column=0, sticky="ew", pady=(0, 8))
+                       anchor="center", justify="center").grid(row=1, column=0, sticky="ew", pady=(0, 4))
+        button = self.ttk.Button(frame, text=tr("Einrichtung & Einstellungen"), command=settings_command)
+        button.grid(row=2, column=0, sticky="ew")
+        self.ttk.Label(frame, text=selector_label, anchor="center", justify="center").grid(
+            row=3, column=0, sticky="ew", pady=(5, 2))
+        picker = self.ttk.Combobox(frame, state="readonly", width=18, justify="center")
+        picker.grid(row=4, column=0, sticky="ew")
         label = self.ttk.Label(frame, textvariable=status, anchor="center", justify="center", wraplength=180)
-        label.grid(row=2, column=0, sticky="ew", pady=(0, 10))
+        label.grid(row=5, column=0, sticky="ew", pady=4)
         self.status_labels.append((label, panel))
-        button = self.ttk.Button(frame, text=button_text, command=command)
-        button.grid(row=3, column=0, sticky="ew")
-        return button
+        return button, picker
 
     def fit_panels(self, _event=None):
         for label, panel in self.status_labels:
@@ -9210,7 +10122,7 @@ class ReviewUI:
         self.risk_hint_label.configure(wraplength=risk_width)
         status_height = max(label.winfo_reqheight() for label, _ in self.status_labels)
         for label, _ in self.status_labels:
-            label.master.rowconfigure(2, minsize=status_height + 10)
+            label.master.rowconfigure(5, minsize=status_height + 8)
 
     def action(self, fn):
         try:
@@ -9243,6 +10155,39 @@ class ReviewUI:
         box.frame.pack(fill="both", expand=True)
         box.show(((self.core.helper_command(), "plain"),))
 
+    def terminal_settings(self):
+        if self.terminal_dialog is not None and self.terminal_dialog.winfo_exists():
+            self.terminal_dialog.lift()
+            return self.terminal_dialog
+        window = self.terminal_dialog = self.tk.Toplevel(self.root)
+        window.title(tr("Terminal · Einrichtung & Einstellungen"))
+        window.transient(self.root)
+        body = self.ttk.Frame(window, padding=12)
+        body.pack(fill="both", expand=True)
+        self.terminal_default_return = self.tk.BooleanVar(window, value=self.core.final_return)
+        self.terminal_home = self.tk.BooleanVar(window, value=self.core.terminal_home)
+        self.ttk.Checkbutton(body, text=tr("Finales Return für neue Terminalbefehle"),
+            variable=self.terminal_default_return, command=lambda: self.action(
+                lambda: self.core.set_final_return(self.terminal_default_return.get(), update_review=False))).pack(anchor="w")
+        self.ttk.Checkbutton(body, text=tr("Neue Terminals im Home-Verzeichnis starten"),
+            variable=self.terminal_home, command=lambda: self.action(
+                lambda: self.core.set_terminal_home(self.terminal_home.get()))).pack(anchor="w", pady=(4, 0))
+        self.ttk.Button(body, text=tr("Schließen"), command=window.destroy).pack(anchor="e", pady=(12, 0))
+        window.bind("<Escape>", lambda _: window.destroy())
+        return window
+
+    def change_command_target(self, _event=None):
+        if self.core.connection != "CONNECTED" or self.command_target_picker.instate(["disabled"]):
+            self.render()
+            return
+        target = next(key for key, label in ui_labels(COMMAND_TARGETS).items() if label == self.command_target.get())
+        self.action(lambda: self.core.set_command_target(target))
+
+    def change_ai_provider(self, _event=None):
+        if self.provider_picker.get() == "Local AI":
+            self.provider_picker.current(0)
+            self.messagebox.showinfo("Local AI", tr("Noch nicht implementiert."), parent=self.root)
+
     def connection_settings(self):
         if self.connection_dialog and self.connection_dialog.window.winfo_exists():
             self.connection_dialog.window.lift()
@@ -9271,6 +10216,9 @@ class ReviewUI:
             dialog.run("bridge", dialog.show_binding)
 
     def change_output_mode(self, _event=None):
+        if self.core.connection != "CONNECTED" or self.core.command_target != "TERMINAL":
+            self.render()
+            return
         selected = self.output_mode.get()
         self.action(lambda: self.core.set_output_mode(next(key for key, label in ui_labels(OUTPUT_MODES).items() if label == selected)))
 
@@ -9280,35 +10228,106 @@ class ReviewUI:
     def change_command_risk(self):
         if not self.risk_enabled.get():
             self.risk_settings_open = False
-        self.action(lambda: self.core.request_command_risk(self.risk_enabled.get()))
+        self.command_risk_action(self.risk_enabled.get())
         if self.core.risk_requested and self.core.risk_setup_state != "READY":
-            self.risk_settings_open = True
-            self.render()
-            self.review_notebook.select(self.risk_summary_tab)
-            self.risk_views.select(self.risk_settings_page)
+            self._select_guard_settings()
 
     def _invoke_risk_control(self, widget):
         widget.invoke()
         return "break"
 
     def command_risk_action(self, enabled=True):
-        # The visible button always names its effect. Cancelling never approves.
+        if enabled and self.core.service_location("sh-guard") is None:
+            self.risk_enabled.set(False)
+            self.show_review_settings("sh-guard")
+            return
+        host, location = self.core.guard_location()
+        if enabled and host != "local" and self.core.guard_consent != host:
+            if not self.messagebox.askyesno("sh-guard · " + location,
+                    tr("Befehle einschließlich lokaler Änderungen zur Analyse an %s senden?") % location,
+                    parent=self.root):
+                self.risk_enabled.set(False)
+                return
         self.action(lambda: self.core.request_command_risk(enabled))
 
-    def confirm_risk_setup(self, confirmed, epoch):
-        # A queued click from an earlier activation cannot authorize a new setup.
-        if (self.core.risk_requested and self.core.risk_setup_state == "INSTALL_CONFIRM"
-                and self.core.risk_setup_epoch == epoch):
-            self.action(lambda: self.core.confirm_command_risk_install(confirmed))
+    def open_bridge_management(self, return_to=None):
+        self.bridge_return_to = return_to
+        if self.bridge_dialog is not None and self.bridge_dialog.window.winfo_exists():
+            self.bridge_dialog.window.lift()
+        else:
+            self.bridge_dialog = self.action(lambda: ConnectionDialog(self, management=True))
+        return self.bridge_dialog
+
+    def _render_bridge_footer(self):
+        site, state = self.core.external_bridge_status()
+        self.bridge_button.configure(text=tr("Bridge-Verwaltung öffnen") if site else tr("Externe Bridge einrichten"))
+        self.bridge_footer_status.set(f"{site} · {state}" if site else "")
+        dialog = self.bridge_dialog
+        if dialog is None:
+            return
+        dialog.render()
+        source = self.bridge_return_to
+        if source and site and dialog.core.paired_remote_binding():
+            self.bridge_return_to = None
+            dialog.window.destroy()
+            if source == "sh-guard":
+                self.choose_guard_location("REMOTE")
+                self.show_review_settings("sh-guard")
+            elif self.connection_dialog:
+                self.connection_dialog.window.lift()
+                self.connection_dialog.choose_location()
+
+    def choose_guard_location(self, location):
+        if self.bridge_return_to == "sh-guard":
+            self.bridge_return_to = None
+        self.guard_pending_remote = location == "REMOTE" and not self.core.saved_remote().get("profile")
+        if not self.guard_pending_remote:
+            if location == "REMOTE":
+                remote = self.core.remote_connection()
+                if remote.bridge_state == "DISCONNECTED":
+                    remote.begin_connection_recovery()
+            self.core.set_service_location("sh-guard", location)
+        self._show_guard_location()
+        self.render()
+
+    def _show_guard_location(self):
+        location = self.core.service_location("sh-guard")
+        pending = self.guard_pending_remote
+        self.guard_location_var.set("REMOTE" if pending else location or "")
+        self.core.guard_inspected = bool(location and not pending)
+        if self.core.guard_inspected:
+            self.guard_panel.pack(fill="both", expand=True)
+            self.guard_panel.refresh()
+        else:
+            self.guard_panel.pack_forget()
+        if pending:
+            self.guard_setup_prompt.pack(fill="x")
+        else:
+            self.guard_setup_prompt.pack_forget()
+
+    def cancel_guard_location(self):
+        if self.bridge_return_to == "sh-guard":
+            self.bridge_return_to = None
+        self.guard_pending_remote = False
+        self._show_guard_location()
+
+    def _build_guard_panel(self, parent):
+        return build_guard_settings(parent, lambda: self.core.guard_location()[1],
+                                    self.core.guard_status, self.core.guard_action, english=UI_LANGUAGE == "en",
+                                    compact=True)
+
+    def _select_guard_settings(self):
+        self._show_guard_location()
+        self.risk_settings_open = True
+        self.render()
+        self.review_notebook.select(self.risk_summary_tab)
+        self.risk_views.select(self.risk_settings_page)
 
     def show_review_settings(self, service, direction=None):
         self.close_review_selector()
         if service == "sh-guard":
-            self.risk_settings_open = True
-            self.render()
-            self.review_notebook.select(self.risk_summary_tab)
-            self.risk_views.select(self.risk_settings_page)
-            self.risk_setup_box.text.focus_set()
+            self._select_guard_settings()
+            (self.guard_panel.disclosure if self.core.guard_inspected else self.guard_location_buttons["LOCAL"]).focus_set()
         else:
             self.text_settings_direction = direction or self.review_selector_direction
             self.text_settings_open = True
@@ -9319,6 +10338,7 @@ class ReviewUI:
 
     def close_review_settings(self, service):
         if service == "sh-guard":
+            self.cancel_guard_location()
             self.risk_settings_open = False
         else:
             self.text_settings_open = False
@@ -9328,30 +10348,28 @@ class ReviewUI:
     def _build_service_settings(self):
         self.risk_settings_page = self.ttk.Frame(self.risk_views)
         self.risk_views.add(self.risk_settings_page, text=tr("Einrichtung & Einstellungen"))
-        self.risk_settings_page.columnconfigure(0, weight=1)
-        self.risk_settings_page.rowconfigure(0, weight=1)
-        self.risk_setup_box = ScrollableText(self.risk_settings_page, readonly=True, height=8)
-        self.risk_setup_box.text.configure(font="TkDefaultFont", takefocus=True)
-        self.risk_setup_box.frame.grid(row=0, column=0, sticky="nsew")
-        self.risk_setup_box.text.bind("<Escape>", lambda _: self.show_review_code())
-        controls = self.ttk.Frame(self.risk_settings_page)
-        controls.grid(row=1, column=0, sticky="ew", pady=6)
-        controls.columnconfigure(1, weight=1)
-        self.risk_install_button = self.ttk.Button(controls, text=tr("Installieren"))
-        self.risk_install_button.grid(row=0, column=0, sticky="w")
-        self.risk_install_cancel = self.ttk.Button(controls, text=tr("Abbrechen"))
-        self.risk_install_cancel.grid(row=0, column=2, sticky="e")
-        self.risk_setup_retry = self.ttk.Button(controls, text=tr("Initialisierung prüfen"),
-                                               command=lambda: self.command_risk_action(True))
-        self.risk_setup_retry.grid(row=0, column=0, sticky="w")
-        self.risk_setup_remove = self.ttk.Button(controls, text=tr("Tool entfernen"), command=self.remove_command_risk)
-        self.risk_setup_remove.grid(row=1, column=0, sticky="w", pady=(6,0))
-        close = self.ttk.Button(controls, text=tr("Schließen"),
-                               command=lambda: self.close_review_settings("sh-guard"))
-        close.grid(row=1, column=2, sticky="e", pady=(6,0))
-        for widget in (self.risk_install_button, self.risk_install_cancel, self.risk_setup_retry,
-                       self.risk_setup_remove, close):
-            widget.bind("<Return>", lambda event: self._invoke_risk_control(event.widget))
+        selector = self.ttk.Frame(self.risk_settings_page, padding=(8, 2))
+        selector.pack(fill="x")
+        self.ttk.Label(selector, text=tr("Wo soll sh-guard laufen?"), font="TkHeadingFont").grid(
+            row=0, column=0, columnspan=2, sticky="w")
+        self.guard_location_var = self.tk.StringVar(master=self.root)
+        self.guard_location_buttons = {}
+        for mode, label in (("LOCAL", tr("Auf diesem Rechner")), ("REMOTE", tr("Über die externe Bridge"))):
+            button = self.ttk.Radiobutton(selector, text=label, value=mode, variable=self.guard_location_var,
+                command=lambda choice=mode: self.action(lambda: self.choose_guard_location(choice)))
+            button.grid(row=1, column=len(self.guard_location_buttons), sticky="w", padx=(0, 8))
+            self.guard_location_buttons[mode] = button
+        self.guard_setup_prompt = self.ttk.Frame(self.risk_settings_page, padding=(12, 0))
+        self.ttk.Label(self.guard_setup_prompt, text=tr("Zuerst die externe Bridge koppeln.")).pack(anchor="w")
+        self.ttk.Button(self.guard_setup_prompt, text=tr("Externe Bridge einrichten"),
+                        command=lambda: self.open_bridge_management("sh-guard")).pack(side="left")
+        self.ttk.Button(self.guard_setup_prompt, text=tr("Zurück"), command=self.cancel_guard_location).pack(side="left")
+        footer = self.ttk.Frame(self.risk_settings_page)
+        footer.pack(side="bottom", fill="x")
+        self.guard_panel = self._build_guard_panel(self.risk_settings_page)
+        self.guard_panel.pack_forget()
+        self.ttk.Button(footer, text=tr("Schließen"),
+                        command=lambda: self.close_review_settings("sh-guard")).pack(side="right")
 
         self.text_settings_page = self.ttk.Frame(self.text_views)
         self.text_views.add(self.text_settings_page, text=tr("Einstellungen"))
@@ -9374,50 +10392,6 @@ class ReviewUI:
             "Unicode- und Formatzeichen werden gezählt und mit Codepoints und Bytes angezeigt. "
             "Auch erlaubte Umlaute erzeugen Hinweise. Dies ist kein Inhalts- oder Datenschutzscan.\n\n"
             "Die Aktivierung wird lokal gespeichert. Das Öffnen dieser Einstellungen aktiviert die Prüfung nicht."), "plain"),))
-
-    def _render_service_settings(self, risk, can_remove):
-        state = self.core.risk_setup_state
-        installation = self.core.risk_installation
-        key = (state, self.core.risk_requested, self.core.risk_setup_epoch, risk.error, installation)
-        if key != self.risk_setup_key:
-            if not self.core.risk_requested:
-                message = tr("Ausgeschaltet. Zum Einrichten oder erneuten Prüfen aktivieren.")
-            else:
-                message = {"READY": tr("Bereit. Die lokale Initialisierung wurde erfolgreich geprüft."),
-                    "INSTALL_CONFIRM": tr("Einrichtung nötig. Erst Installieren lädt das Tool herunter."),
-                    "UNAVAILABLE": tr("Initialisierung fehlgeschlagen. Details unten; erneut prüfen möglich."),
-                    "CHECKING_TOOL": tr("Initialisierung wird geprüft …"),
-                    "WAITING_FOR_REAP": tr("Vorherigen Vorgang beenden …"),
-                    "INSTALLING": tr("Installation läuft …"), "DOWNLOADING": tr("Download läuft …"),
-                    "VERIFYING": tr("Prüfsummen werden geprüft …"), "PROBING": tr("Lokaler Funktionstest läuft …")}.get(state, state)
-            details = (tr("sh-guard · Einrichtung & Einstellungen\n\n") + message
-                + tr("\n\nStatische Shellanalyse auf diesem Gerät. Keine dauerhafte Netzwerkverbindung nötig. "
-                "Bei jedem App-Start wird eine gespeicherte Aktivierung erneut initialisiert. "
-                "Fehlt das Tool, wird ein neuer Download hier ausdrücklich bestätigt.\n\n"))
-            if installation:
-                release = installation.release
-                details += ("Version: " + release.version + "\nDownload: %.1f MB" % (release.archive_size/1_000_000)
-                    + tr("\nLizenz: GPL-3.0-only\nQuelle: ") + release.url
-                    + tr("\nInstallationsziel: ") + str(installation.destination)
-                    + tr("\nArchiv-SHA-256: ") + release.archive_sha256
-                    + tr("\nBinary-SHA-256: ") + release.binary_sha256 + "\n\n")
-            details += tr("Download und Programm werden geprüft. Commands werden nur analysiert; Ihre Freigabe bleibt erforderlich.")
-            if sys.platform == "darwin":
-                details += tr(" macOS kann eine manuelle Gatekeeper-Bestätigung verlangen.")
-            if risk.error:
-                details += tr("\n\nFehlercode: ") + risk.error
-            self.risk_setup_box.show(((details, "plain"),))
-            self.risk_setup_key = key
-        consent = self.core.risk_requested and state == "INSTALL_CONFIRM"
-        for button in (self.risk_install_button, self.risk_install_cancel):
-            button.grid() if consent else button.grid_remove()
-        epoch = self.core.risk_setup_epoch
-        self.risk_install_button.configure(command=lambda: self.confirm_risk_setup(True, epoch))
-        self.risk_install_cancel.configure(command=lambda: self.confirm_risk_setup(False, epoch))
-        self.risk_setup_retry.grid_remove() if consent else self.risk_setup_retry.grid()
-        self.risk_setup_retry.configure(text=tr("Aktivieren & einrichten") if not self.core.risk_requested
-            else tr("Initialisierung erneut prüfen"), state="disabled" if state in RISK_BUSY_STATES else "normal")
-        self.risk_setup_remove.configure(state="normal" if can_remove else "disabled")
 
     def _build_command_risk_tabs(self):
         self.risk_views = self.ttk.Notebook(self.risk_summary_tab)
@@ -9524,7 +10498,7 @@ class ReviewUI:
                 tooth = min(dx,dy) <= 1.5 or abs(dx-dy) <= 1
                 if 10 <= radius <= 30 or (30 < radius <= 59 and tooth):
                     self.review_settings_icon.put(foreground, (x,y))
-        for button in (self.risk_settings_button, self.text_settings_button):
+        for button in (self.risk_settings_button, self.text_settings_button, self.bridge_button):
             button.configure(image=self.review_settings_icon, compound="left")
         self.review_arrow = self.tk.PhotoImage(master=self.root, width=9, height=6)
         for row in range(4):
@@ -9718,11 +10692,10 @@ class ReviewUI:
         return "break"
 
     def remove_command_risk(self):
-        installation = self.core.risk_installation
-        if installation and self.messagebox.askyesno(tr("Lokales Tool entfernen"),
-                tr("Nur das geprüfte AITL-Binary entfernen?\n") + str(installation.destination), parent=self.root):
-            self.action(lambda: self.core.request_command_risk(False))
-            self.action(self.core.remove_command_risk)
+        previous = self.core.guard_status()
+        if previous["state"] == "READY" and self.messagebox.askyesno(tr("Tool entfernen"),
+                "sh-guard · " + self.core.guard_location()[1] + "\n" + previous["destination"], parent=self.root):
+            self.action(lambda: self.core.guard_action("remove", previous))
 
     def _apply_sent_styling(self, sent):
         """M3: mark the whole sent snapshot; risk colors and control marks stay
@@ -9758,12 +10731,15 @@ class ReviewUI:
             self.review_notebook.select(self.code_tab)
             self.review_tab_identity = identity
         self.risk_enabled.set(self.core.risk_requested or self.core._command_risk.enabled)
-        self.risk_checkbox.configure(state="normal")
+        caption = tr("sh-guard: statische Shellanalyse")
+        if self.core.service_location("sh-guard"):
+            caption += " · " + self.core.guard_location()[1]
+        self.risk_checkbox.configure(state="normal", text=caption)
         labels = {"DISABLED": tr("Analyse ausgeschaltet"), "IDLE": tr("Bereit für den nächsten Command") if not snapshot.review else tr("Nur für AI → Terminal"),
                   "CHECKING_TOOL": tr("sh-guard wird geprüft"), "INSTALL_CONFIRM": tr("Installation bestätigen"),
                   "INSTALLING": tr("sh-guard wird installiert"), "SCANNING": tr("Prüfung läuft"),
                   "DOWNLOADING": tr("sh-guard wird heruntergeladen"),
-                  "VERIFYING": tr("Download wird geprüft"), "PROBING": tr("Lokaler Funktionstest läuft"),
+                  "VERIFYING": tr("Download wird geprüft"), "PROBING": tr("Funktionstest auf der Bridge läuft"),
                   "WAITING_FOR_REAP": tr("Vorherige Prüfung wird beendet"),
                   "STALE": tr("Analyse nicht mehr aktuell"), "UNKNOWN": tr("Analyse unvollständig"),
                   "UNAVAILABLE": tr("Prüfung nicht verfügbar")}
@@ -9800,8 +10776,13 @@ class ReviewUI:
                   "danger": ("#943413", "#ffbb91"), "critical": ("#a01c30", "#ffb4bd")}
         self.risk_status_label.configure(foreground=colors[level][not light])
         busy = risk.state in RISK_BUSY_STATES
+        service = self.core.guard_client.status if self.core.guard_client else {}
         action_label = tr("Abbrechen") if busy else tr("Analyse aktivieren") if risk.state == "DISABLED" else tr("Erneut prüfen")
-        action = lambda enabled=not busy: self.command_risk_action(enabled)
+        if service.get("instance") and service.get("state") == risk.state and (busy or risk.state == "UNAVAILABLE"):
+            operation = "cancel" if busy else "check"
+            action = lambda: self.action(lambda: self.core.guard_action(operation, service))
+        else:
+            action = lambda enabled=not busy: self.command_risk_action(enabled)
         if busy or risk.state in {"UNKNOWN", "UNAVAILABLE"}:
             self.risk_action_button.configure(text=action_label, command=action)
             self.risk_action_button.grid()
@@ -9819,11 +10800,9 @@ class ReviewUI:
         if risk.state != "RESULT":
             spans = ()
         sent = snapshot.review is not None and snapshot.review_state in SENT_REVIEW_STATES
-        installation = self.core.risk_installation
-        installed = bool(installation and installation.destination.exists())
-        can_remove = (installed and not busy and self.core._command_risk.quiescent()
-                      and (self.core.risk_setup is None or not self.core.risk_setup.thread.is_alive()))
-        key = (snapshot.review, risk, spans, sent, installed, can_remove)
+        installed = service.get("state") == "READY"
+        can_remove = installed and not busy
+        key = (snapshot.review, risk, spans, sent, installed, can_remove, service.get("instance"), service.get("generation"))
         if key != self.risk_render_key:
             same_content = self.risk_render_key is not None and self.risk_render_key[0] == snapshot.review
             view = self.editor.text.yview()
@@ -9843,12 +10822,6 @@ class ReviewUI:
                 or (sent and risk.state == "RESULT") else "normal")
             self.risk_remove_button.configure(state="normal" if can_remove else "disabled")
             self._render_command_risk_summary(snapshot, status, hint)
-            def plain(value):
-                if isinstance(value, (dict, MappingProxyType)):
-                    return {k: plain(v) for k, v in value.items()}
-                if isinstance(value, tuple):
-                    return [plain(v) for v in value]
-                return value
             details = (status or tr("Reviewer deaktiviert")) + tr("\nStatische Analyse · keine Freigabe oder Sicherheitsgarantie\n")
             if risk.result and risk.result.data:
                 details += (tr("\nSnapshot: %s · Revision %s · finales Return: %s\nTool: %s\nBinary-SHA-256: %s\nAnalysiert: %s\n")
@@ -9856,22 +10829,20 @@ class ReviewUI:
                        risk.result.key.tool.version, risk.result.key.tool.sha256, risk.result.analyzed_at))
                 details += tr("Sitzung: %s\nToolpfad/Target: %s\n") % (risk.result.key.session, risk.result.key.tool.binary)
                 details += tr("\nGesamtbefund / Parse Confidence / Risk Factors / Subcommands / Pipeline-Taint / MITRE\n")
-                details += json.dumps(plain(risk.result.data), ensure_ascii=True, indent=2)
+                details += json.dumps(plain_risk_data(risk.result.data), ensure_ascii=True, indent=2)
                 details += tr("\nquick_decision ist nur ein Upstream-Label, keine AITL-Autorisierung.\n")
-            installation = self.core.risk_installation
-            if installation:
-                release = installation.release
-                details += (tr("\nInstallationsziel: ") + str(installation.destination) + tr("\nQuelle: ") + release.url
+            release = RISK_RELEASES.get(service.get("target"))
+            if release:
+                details += (tr("\nInstallationsziel: ") + service["destination"] + tr("\nQuelle: ") + release.url
                             + tr("\nArchiv-SHA-256: ") + release.archive_sha256 + tr("\nBinary-SHA-256: ") + release.binary_sha256)
             details += tr("\nSeparates Tool: GPL-3.0-only · Quelle/Lizenz: https://github.com/aryanbhosale/sh-guard/tree/v0.1.10\n")
             details += tr("Commandtext kann kurzzeitig in OS-Prozessargumenten sichtbar sein.\n")
-            if sys.platform == "darwin":
+            if release and release.target.endswith("apple-darwin"):
                 details += tr("Gatekeeper: bei nicht eindeutigem Startfehler manuell prüfen; keine automatische Ausnahme/Quarantäneentfernung.\n")
             if error:
                 details += tr("\nFehlercode: ") + error + "\n"
             self.risk_details_box.show(((details, "plain"),))
             self.risk_render_key = key
-        self._render_service_settings(risk, can_remove)
         self._sync_review_tools(snapshot, command)
 
     def _render_command_risk_summary(self, snapshot, status, hint):
@@ -9902,9 +10873,8 @@ class ReviewUI:
                               "Auch ein unauffälliger Befund ersetzt Ihre Prüfung und Freigabe nicht.\n"), "plain"))
         else:
             fragments.append((tr("So funktioniert die Analyse\n"), "heading"))
-            fragments.append((tr("sh-guard untersucht den finalen Command lokal, ohne ihn auszuführen. "
-                              "Die Aktivierung wird gespeichert. Terminalausgaben werden nicht analysiert. "
-                              "Jeder Transfer benötigt weiterhin Ihre eigene Freigabe.\n"), "plain"))
+            fragments.append((tr("Die gewählte Bridge analysiert die aktuelle Befehlsfassung einschließlich Ihrer Änderungen. "
+                              "Die Aktivierung gilt für diesen Standort. Sie entscheiden über die Übergabe ans Terminal.\n"), "plain"))
         self.risk_summary_box.show(fragments)
 
     def show_payload_details(self):
@@ -10224,6 +11194,7 @@ class ReviewUI:
         self.approve()
 
     def render(self):
+        self._render_bridge_footer()
         snapshot = self.core.snapshot()
         self.terminal_status.set({"CONNECTED": tr("Terminal verbunden\nBash · lokale Sitzung\nApp schließen beendet diese Shell nicht"),
                                   "WAITING_FOR_TERMINAL": tr("Nicht verbunden\nTerminal kann geöffnet werden"),
@@ -10274,8 +11245,7 @@ class ReviewUI:
                        else self.core.command_target)
         command_ready = connected or next_target == "CLIPBOARD"
         self.command_target.set(ui_labels(COMMAND_TARGETS)[self.core.command_target])
-        self.command_target_picker.configure(state="readonly" if snapshot.review_state in self.core.STAGE_FREE
-                                              and self.core.pending_take is None else "disabled")
+        self.command_target_picker.configure(state="readonly" if connected and not busy else "disabled")
         can_review = command_ready and not busy and (ready or parked) and not proposal_review_active
         self.from_ai_button.configure(state="normal" if can_review else "disabled")
         proposal_status = tr("Command-Vorschlag vorhanden") if ready else (
@@ -10299,11 +11269,17 @@ class ReviewUI:
         self.readiness.configure(text=proposal_status,
                                  background="#ffcc99" if waiting_for_review else "#dcefe1" if can_review else "#f6e4d0",
                                  foreground="#713800" if waiting_for_review else "#285739" if can_review else "#75451b")
-        self.output_picker.configure(values=tuple(ui_labels(OUTPUT_MODES).values()),
-                                     state="disabled" if busy else "readonly")
+        if connected and snapshot.output_mode != "CLIPBOARD":
+            self.output_controls.grid()
+        else:
+            self.output_controls.grid_remove()
+        self.output_picker.configure(state="disabled" if busy else "readonly")
         self.output_mode.set(ui_labels(OUTPUT_MODES)[snapshot.output_mode])
         self.preference.set(snapshot.preferences)
         self.final_return.set(snapshot.final_return)
+        if self.terminal_dialog is not None and self.terminal_dialog.winfo_exists():
+            self.terminal_default_return.set(snapshot.final_return)
+            self.terminal_home.set(self.core.terminal_home)
         review = snapshot.review
         self.normalization.set(normalization_summary(review) if review else "")
         command = review is not None and review.direction == "TO_TERMINAL"
@@ -10399,21 +11375,11 @@ def run_gui():
         root = tk.Tk()
         core.start_local(os.getcwd())
         ReviewUI(root, core)
-        root.after_idle(core.begin_connection_recovery)
+        root.after_idle(core.restore_services)
         root.mainloop()
     finally:
         core.close()
 
-
-
-def outer_test_child(fd, directory):
-    os.setsid()
-    fcntl.ioctl(fd, termios.TIOCSCTTY, 0)
-    for target in (0, 1, 2):
-        os.dup2(fd, target)
-    if fd > 2:
-        os.close(fd)
-    run_terminal_helper(directory)
 
 
 class IntegrationFixture:
@@ -10435,7 +11401,8 @@ class IntegrationFixture:
         os.set_blocking(self.outer, False)
         self.transcript = bytearray()
         try:
-            self.wait(lambda: self.core.connection == "CONNECTED" and b"AITL_P0$ " in self.core.output.data)
+            # Fixture startup includes two isolated Python interpreters before the Bash prompt.
+            self.wait(lambda: self.core.connection == "CONNECTED" and PROMPT in self.core.output.data, timeout=10)
         except BaseException:
             self.close()
             raise
@@ -10951,11 +11918,12 @@ from pathlib import Path
 from urllib.parse import parse_qsl, urlsplit
 
 BRIDGE_BODY_LIMIT = 128 * 1024
+BRIDGE_CONNECTION_LIMIT = 64
 BRIDGE_RETENTION = 24 * 3600
 BRIDGE_OUTPUT_LIMIT = 64 * 1024
 BRIDGE_BLOCK_SIZES = ("SINGLE", "SMALL", "MEDIUM", "LARGE")
 BRIDGE_VERSIONS = ("2026-07-28", "2025-11-25", "2025-06-18", "2025-03-26")
-BRIDGE_SERVER_INFO = {"name": "admin-in-the-loop", "version": "0.9.30"}
+BRIDGE_SERVER_INFO = {"name": "admin-in-the-loop", "version": "0.9.34"}
 BRIDGE_BASE32 = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 # M9 Folgeaenderung (Operator-Journal 100): pairing-code validity 10 minutes; the
 # attempt limit (5), claim-path cooldown and the separate PAIR_PENDING token lifetime
@@ -11552,8 +12520,9 @@ class BridgeStore:
         # Bruteforce unpraktisch (max. 5 Fehlversuche je 600s-Fenster, gemeinsamer
         # PAIR-Throttle 10/min), Einmalverbrauch/Replay unveraendert.
         code = "".join(secrets.choice(BRIDGE_BASE32) for _ in range(8))
-        self.pair = {"hash": hashlib.sha256(code.encode()).digest(),
-                     "deadline": self.clock() + BRIDGE_PAIR_WINDOW, "failures": 0}
+        with self.lock:
+            self.pair = {"hash": hashlib.sha256(code.encode()).digest(),
+                         "deadline": self.clock() + BRIDGE_PAIR_WINDOW, "failures": 0}
         return "-".join(code[i:i + 4] for i in range(0, 8, 4))
 
     def claim(self, value):
@@ -12202,6 +13171,8 @@ class BridgeRequest:
 
 class BridgeHTTPServer(http.server.ThreadingHTTPServer):
     daemon_threads = True
+    # Keep bursts within the service's existing admission limit in the listen queue.
+    request_queue_size = BRIDGE_CONNECTION_LIMIT
     tls_context = None
 
     def __init__(self, address, handler, tls=None):
@@ -13000,19 +13971,23 @@ class BridgeService:
     MCP_LOG_METHODS = ("initialize", "ping", "server/discover", "tools/list", "tools/call",
                        "events/list", "events/subscribe", "events/unsubscribe")
 
-    def __init__(self, store):
+    def __init__(self, store, service_directory=None, local_network=None):
         self.store = store
         store.on_new_output = self.queue_output_events
         self.changed = threading.Event()
         self.stopped = True
         self.inflight = 0
         self.inflight_lock = threading.Lock()
-        self.connection_slots = threading.BoundedSemaphore(64)
+        self.connection_slots = threading.BoundedSemaphore(BRIDGE_CONNECTION_LIMIT)
         self.rate, self.rate_lock = {}, threading.Lock()
         self.controller_hosts, self.mcp_hosts = set(), set()
         self.jobs, self.jobs_cv = [], threading.Condition()
         self.verified = {}
         self.tunnel = BridgeTunnel(store.directory)
+        self.service_directory = service_directory or store.directory
+        self.local_network = local_network
+        self.guard_lock = threading.Lock()
+        self.guard = None
         self.webhook_thread = threading.Thread(target=self.webhook_loop, name="aitl-webhook", daemon=True)
         self.routes = {
             "CONTROLLER": {"/v1/status": (self._controller_status, "GET"),
@@ -13025,6 +14000,9 @@ class BridgeService:
                             "/v1/chat-binding/rotate": (self._controller_chat_binding_rotate, "POST"),
                             "/v1/tunnel/status": (self._controller_tunnel_status, "GET"),
                             "/v1/tunnel/config": (self._controller_tunnel_config, "PUT"),
+                            "/v1/services/sh-guard": (self._guard_status, "GET"),
+                            "/v1/services/sh-guard/setup": (self._guard_setup, "POST"),
+                            "/v1/services/sh-guard/analyze": (self._guard_analyze, "POST"),
                             "/v1/pair/claim": (self._controller_claim, "POST"),
                             "/v1/pair/confirm": (self._controller_confirm, "POST"),
                             "/v1/pair/hello": (self._controller_hello, "POST")},
@@ -13038,6 +14016,9 @@ class BridgeService:
     def stop(self):
         self.stopped = True
         self.tunnel.close()
+        with self.guard_lock:
+            if self.guard is not None:
+                self.guard.close()
         with self.jobs_cv:
             self.jobs_cv.notify_all()
 
@@ -13066,7 +14047,7 @@ class BridgeService:
         if self.stopped:
             raise BridgeError("busy", 503)
         with self.inflight_lock:
-            check(self.inflight < 64, "busy", 503)
+            check(self.inflight < BRIDGE_CONNECTION_LIMIT, "busy", 503)
             self.inflight += 1
 
     def leave(self):
@@ -13126,6 +14107,50 @@ class BridgeService:
         check(type(value["version"]) is int and value["version"] == 1)
         return self.json(self.store.rotate_chat_binding(value["request_id"],
                                                         value["expected_generation"], principal["id"]))
+
+    def shell_guard(self):
+        with self.guard_lock:
+            check(not self.stopped, "busy", 503)
+            if self.guard is None:
+                self.guard = ShellGuardService(self.service_directory, self.store.instance, self.local_network)
+            return self.guard
+
+    def _guard_status(self, request):
+        self.principal(request, "CONTROLLER")
+        check(not request.query)
+        return self.json(self.shell_guard().status())
+
+    def _guard_request(self, request):
+        self.principal(request, "CONTROLLER")
+        check(not request.query)
+        value = self.body(request)
+        self.principal(request, "CONTROLLER")
+        check(type(value.get("version")) is int and value["version"] == 1)
+        check(value.get("instance") == self.store.instance, "risk_stale", 409)
+        return value
+
+    def _guard_setup(self, request):
+        value = self._guard_request(request)
+        exact(value, {"version", "instance", "generation", "action"})
+        check(type(value["action"]) is str and value["action"] in {"install", "check", "remove", "cancel"})
+        try:
+            return self.json(self.shell_guard().action(value["action"], value["generation"]))
+        except ProbeError as exc:
+            raise BridgeError(str(exc), 409) from None
+
+    def _guard_analyze(self, request):
+        value = self._guard_request(request)
+        try:
+            result = self.shell_guard().analyze(value)
+        except ProbeError as exc:
+            raise BridgeError(str(exc), 409 if str(exc) in {"risk_stale", "risk_setup_busy", "risk_unavailable"} else 400) from None
+        try:
+            encoded(result)
+        except BridgeError as exc:
+            if exc.code != "body_limit":
+                raise
+            raise BridgeError("risk_result_limit", 413) from None
+        return self.json(result)
 
     def _controller_tunnel_status(self, request):
         self.principal(request, "CONTROLLER")
@@ -13692,8 +14717,9 @@ def bridge_certificate(directory, names, renew=False):
     return context, pin
 
 
-def bridge_serve(store, bind="127.0.0.1", port=0, names=(), ready_fd=None, bootstrap=None, pair=False):
-    service = BridgeService(store)
+def bridge_serve(store, bind="127.0.0.1", port=0, names=(), ready_fd=None, bootstrap=None, pair=False,
+                 service_directory=None, gui=False, local_network=None):
+    service = BridgeService(store, service_directory, local_network)
     tls, pin = bridge_certificate(store.directory, names) if names else (None, None)
     check(ipaddress.ip_address(bind).is_loopback or tls is not None, "remote_requires_tls")
 
@@ -13762,7 +14788,50 @@ def bridge_serve(store, bind="127.0.0.1", port=0, names=(), ready_fd=None, boots
                 # controller hello (or with --pair). Hello authorises nothing itself.
                 print("Bridge läuft; zurück zur Haupt-App und Verbindung testen. Der Kopplungscode "
                       "erscheint hier erst nach ausdrücklichem Hallo des Controllers (oder --pair).", flush=True)
-        stop.wait()
+        if ready_fd is not None:
+            stop.wait()
+        else:
+            # A second operator launch only raises a window in this same service.
+            # A private request file also works for an already running headless bridge.
+            request_path = store.directory / "show-services"
+            def build_services(page):
+                guard = service.shell_guard()
+                return build_guard_settings(page, socket.gethostname, guard.status,
+                    lambda action, previous: guard.action(action, previous["generation"]), english=english)
+
+            language = os.environ.get("LC_ALL") or os.environ.get("LC_MESSAGES") or os.environ.get("LANG", "")
+            english = not language.lower().startswith("de")
+            def requested():
+                try:
+                    request_path.unlink()
+                    return True
+                except FileNotFoundError:
+                    return False
+            while not stop.is_set():
+                if gui or requested():
+                    gui = False
+                    try:
+                        window = show_bridge_management(None, socket.gethostname,
+                            lambda: "PAIRED" if store.controller_paired() else "UNPAIRED", build_services,
+                            english=english, pairing=(pin, store.open_pair) if pin else None)
+                    except (ImportError, RuntimeError):
+                        bridge_console("bridge_gui_unavailable: Tk und grafische Sitzung auf der Bridge prüfen.")
+                    except Exception as exc:
+                        if type(exc).__name__ != "TclError":
+                            raise
+                        bridge_console("bridge_gui_unavailable: Tk und grafische Sitzung auf der Bridge prüfen.")
+                    else:
+                        def check_stop():
+                            if stop.is_set():
+                                window.destroy()
+                            else:
+                                if requested():
+                                    window.deiconify()
+                                    window.lift()
+                                window.after(250, check_stop)
+                        window.after(250, check_stop)
+                        window.mainloop()
+                stop.wait(0.5)
     finally:
         service.stop()
         for server in servers:
@@ -13790,7 +14859,7 @@ def bridge_main(argv=None):
     os.umask(0o077)
     # Include parser and access logs: hostile paths/body errors must not reach logs.
     logging.disable(logging.CRITICAL)
-    parser = BridgeArgumentParser(description="Admin in the Loop — transport-only Bridge/MCP service")
+    parser = BridgeArgumentParser(description="Admin in the Loop — Bridge/MCP service with managed review tools")
     # M9: no mandatory paths/flags for the common start; home state dir and
     # 0.0.0.0:8443 defaults apply, overrides stay explicit. No bind prompting.
     parser.add_argument("--state-dir", default=None)
@@ -13803,11 +14872,33 @@ def bridge_main(argv=None):
     parser.add_argument("--renew-cert", action="store_true", help="Renew TLS certificate locally, preserving its SPKI key")
     parser.add_argument("--bootstrap-fd", type=int)
     parser.add_argument("--ready-fd", type=int)
+    parser.add_argument("--gui", action="store_true", help="Open the bridge service management window")
     args = parser.parse_args(argv)
     bootstrap = args.bootstrap_fd is not None
+    check(not args.gui or not (bootstrap or args.revoke or args.renew_cert), "choose_one_role")
     bind, port, names = resolve_bridge_runtime(args.bind, args.port, args.tls_name, bootstrap)
     directory = protected_directory(resolve_state_dir(args.state_dir) if args.state_dir
                                     else str(default_state_dir()))
+    if bootstrap or args.revoke or args.renew_cert:
+        return _bridge_start(args, directory, bind, port, names, bootstrap)
+    import fcntl
+    fd = os.open(directory / "service.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            check(args.gui, "bridge_already_running")
+            private_write(directory / "show-services", b"open")
+            bridge_console("Dienstfenster auf der laufenden Bridge angefordert.")
+            return 0
+        return _bridge_start(args, directory, bind, port, names, False)
+    finally:
+        os.close(fd)
+
+
+def _bridge_start(args, directory, bind, port, names, bootstrap):
+    service_directory = None
+    local_network = None
     conversation_path = directory / "conversation"
     if conversation_path.exists():
         conversation = private_read(conversation_path, 64).decode("ascii")
@@ -13833,8 +14924,18 @@ def bridge_main(argv=None):
             return 0
         if bootstrap:
             with os.fdopen(args.bootstrap_fd, "rb") as source:
-                boot = parse(source.read(4097))
-            exact(boot, {"controller_token", "ai_token", "conversation"})
+                raw = source.read(16385)
+                check(len(raw) <= 16384, "invalid_bootstrap")
+                boot = parse(raw)
+            exact(boot, {"controller_token", "ai_token", "conversation"}, {"service_directory", "download_network"})
+            if "download_network" in boot:
+                local_network = boot["download_network"]
+                exact(local_network, set(), {"https_proxy", "no_proxy", "SSL_CERT_FILE", "SSL_CERT_DIR"})
+                check(all(type(value) is str for value in local_network.values()), "invalid_bootstrap")
+            if "service_directory" in boot:
+                check(type(boot["service_directory"]) is str and Path(boot["service_directory"]).is_absolute(),
+                      "unsafe_service_directory")
+                service_directory = Path(boot["service_directory"])
             check(boot["conversation"] == conversation and args.ready_fd is not None and not args.tls_name
                   and bind == "127.0.0.1", "invalid_bootstrap")
             store.issue("CONTROLLER", boot["controller_token"])
@@ -13853,7 +14954,8 @@ def bridge_main(argv=None):
         # A fresh unpaired bridge only announces readiness; the explicit controller
         # hello (or --pair for operator/service starts) creates the local one-time
         # code. Limits and claim rules are unchanged.
-        bridge_serve(store, bind, port, names, args.ready_fd, pair=args.pair)
+        bridge_serve(store, bind, port, names, args.ready_fd, pair=args.pair, service_directory=service_directory,
+                     gui=args.gui, local_network=local_network)
         return 0
     finally:
         store.close()
@@ -13883,12 +14985,6 @@ def main():
     if sys.version_info < (3, 11) or os.name != "posix":
         print("Requires Unix and Python >= 3.11.", file=sys.stderr)
         return 2
-    if len(sys.argv) == 4 and sys.argv[1] == "--_shell-child":
-        shell_child(int(sys.argv[2]), sys.argv[3])
-        return 2
-    if len(sys.argv) == 4 and sys.argv[1] == "--_outer-test-child":
-        outer_test_child(int(sys.argv[2]), sys.argv[3])
-        return 0
     if len(sys.argv) > 1 and sys.argv[1] == "--bridge":
         return bridge_main(sys.argv[2:])
     if "--bridge" in sys.argv[1:]:
@@ -13897,7 +14993,7 @@ def main():
     parser.add_argument("--version", action="version",
                         version="Admin in the Loop " + APP_VERSION)
     parser.add_argument("--gui", action="store_true")
-    parser.add_argument("--bridge", action="store_true", help="Start the headless transport-only Bridge service")
+    parser.add_argument("--bridge", action="store_true", help="Start the Bridge service")
     parser.add_argument("--self-test", action="store_true")
     parser.add_argument("--update", nargs="*", metavar="QUELLE",
                         help="Update [GITHUB_USER [BRANCH]]; Standard: GeektankLabs/admin-in-the-loop, main. Auch als Unterbefehl update möglich.")
@@ -13923,6 +15019,7 @@ def main():
                    "update_source": "Download ist keine syntaktisch gültige, passende AITL-Anwendungsdatei.",
                    "update_size": "Anwendungsdatei leer oder zu groß.",
                    "update_downgrade": "Die Quelle ist älter. Datei unverändert. Für einen bewussten Versionswechsel den Branch ausdrücklich angeben.",
+                   "update_preferences": "Die Einstellungen konnten für diese Version nicht vorbereitet werden. Rechte und Inhalt von preferences.json prüfen.",
                    "update_target": "Updateziel ist keine reguläre Datei.",
                    "update_target_changed": "Die lokale Datei wurde während des Updates verändert. Bitte erneut starten.",
                    "update_backup": "Sicherungsziel ist keine reguläre Datei.",

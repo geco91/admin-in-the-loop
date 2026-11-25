@@ -21,6 +21,8 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import admin_in_the_loop as a
+from test_bridge_shguard import guard_bridge
+from test_command_risk import select_fixture_tool
 import test_risk_install_ui as fixtures
 
 
@@ -264,7 +266,9 @@ class LifecycleBoundaryTests(unittest.TestCase):
                     "if command != ':\\n':\n"
                     "    import signal, time\n"
                     "    signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
-                    "    with open(%r, 'w') as marker: marker.write(str(os.getpid()))\n"
+                    "    path = %r\n"
+                    "    with open(path + '.tmp', 'w') as marker: marker.write(str(os.getpid()))\n"
+                    "    os.replace(path + '.tmp', path)\n"
                     "    while True: time.sleep(1)\n" % str(self.marker)).encode()
         self.binary = source.replace(b"command = sys.argv[7]\n", blocking)
         raw = fixtures.archive_for(self.binary)
@@ -292,7 +296,7 @@ class LifecycleBoundaryTests(unittest.TestCase):
 
         def paused(*args):
             entered.set()
-            release.wait(2)
+            release.wait()  # The owner releases the probe in finally, after the child checks the lease.
             return original(*args)
 
         def check():
@@ -318,7 +322,7 @@ class LifecycleBoundaryTests(unittest.TestCase):
                 )
                 child = subprocess.run([sys.executable, "-I", "-B", "-c", code,
                                         str(Path(a.__file__).parent), self.tool.lease_path],
-                                       shell=False, capture_output=True, timeout=3)
+                                       shell=False, capture_output=True, timeout=15)
                 self.assertEqual(child.returncode, 0)
                 self.assertEqual(child.stdout, b"risk_lease_busy\n")
                 self.assertEqual(child.stderr, b"")
@@ -331,20 +335,17 @@ class LifecycleBoundaryTests(unittest.TestCase):
 
     def test_active_analysis_blocks_cross_instance_remove_until_cancel_reap(self):
         self.core.review_command("printf held")
-        self.core.set_command_risk(self.tool, self.work)
+        select_fixture_tool(self.core, self.tool, self.work)
         self.wait(self.marker.exists)
         pid = int(self.marker.read_text())
         with self.assertRaisesRegex(a.ProbeError, "risk_lease_busy"):
             a.CommandRiskInstallation(self.base, self.release).remove()
         os.kill(pid, 0)
         self.core.request_command_risk(False)
-        with self.assertRaisesRegex(a.ProbeError, "risk_cleanup_busy"):
-            self.core.risk_installation = self.installation
-            self.core.remove_command_risk()
         self.wait(self.core._command_risk.quiescent)
         with self.assertRaises(ChildProcessError):
             os.waitpid(pid, os.WNOHANG)
-        self.core.remove_command_risk()
+        self.installation.remove()
         self.assertFalse(Path(self.tool.binary).exists())
 
     def test_lease_wait_is_bounded_and_cancelable(self):
@@ -383,19 +384,18 @@ class LifecycleBoundaryTests(unittest.TestCase):
             processes.append(process)
             return process
 
-        with mock.patch.object(a.subprocess, "Popen", side_effect=tracked), \
-                mock.patch.object(a, "command_risk_release", return_value=self.release):
+        bridge = guard_bridge(self, self.base, self.release)
+        with mock.patch.object(a.subprocess, "Popen", side_effect=tracked):
             review = self.core.review_command("printf held")
-            self.core.set_command_risk(self.tool, self.work)
-            self.wait(self.marker.exists)
+            self.core.request_command_risk(True)
+            self.wait(lambda: self.core.command_risk_snapshot() and self.marker.exists(), timeout=14)
             old_pid = int(self.marker.read_text())
             self.core.edit_review(review.id, ":", True)
-            self.core.request_command_risk(True)
-            self.assertEqual(self.core.risk_setup_state, "WAITING_FOR_REAP")
-            self.assertIsNone(self.core.risk_setup)
-            # Owner continues to observe/edit/pump while TERM is ignored.
+            guard = bridge.service.shell_guard()
+            with self.assertRaisesRegex(a.ProbeError, "risk_setup_busy"):
+                guard.action("check", guard.status()["generation"])
             self.core.snapshot()
-            self.wait(lambda: self.core.command_risk_snapshot().state == "RESULT")
+            self.wait(lambda: self.core.command_risk_snapshot().state == "RESULT", timeout=14)
             self.assertEqual(self.core.review.text, ":\n")
             with self.assertRaises(ChildProcessError):
                 os.waitpid(old_pid, os.WNOHANG)
@@ -406,18 +406,14 @@ class LifecycleBoundaryTests(unittest.TestCase):
 
     def test_off_on_close_during_reap_never_launches_pending_setup(self):
         self.core.review_command("printf held")
-        self.core.set_command_risk(self.tool, self.work)
+        select_fixture_tool(self.core, self.tool, self.work)
         self.wait(self.marker.exists)
         pid = int(self.marker.read_text())
-        with mock.patch.object(a, "command_risk_release", return_value=self.release), \
-                mock.patch.object(a, "CommandRiskSetup") as setup:
-            self.core.request_command_risk(True)
+        with mock.patch.object(a, "download_command_risk") as download:
             self.core.request_command_risk(False)
-            self.core.request_command_risk(True)
-            self.assertEqual(self.core.risk_setup_state, "WAITING_FOR_REAP")
             self.core.close()
-            setup.assert_not_called()
-            self.assertIsNone(self.core.risk_setup_pending)
+            download.assert_not_called()
+            self.assertIsNone(self.core.guard_client)
         with self.assertRaises(ChildProcessError):
             os.waitpid(pid, os.WNOHANG)
         self.core.channel = None
