@@ -208,12 +208,21 @@ class LanguageUITests(unittest.TestCase):
                     ui = a.ReviewUI(root, core)
                     root.update()
                     self.assertEqual(ui.output_mode.get(), clipboard)
+                    core.connection = "STARTING_SHELL"
+                    core._event({"type": "ready", "session": "a" * 36})
+                    ui.render()
                     ui.output_mode.set('Last 20' if language == 'en' else 'Letzte 20')
                     ui.change_output_mode()
                     self.assertEqual(core.output_mode, 'LAST_20')
-                    ui.output_mode.set(clipboard)
-                    ui.change_output_mode()
+                    ui.command_target.set(clipboard)
+                    ui.change_command_target()
                     self.assertEqual(core.output_mode, 'CLIPBOARD')
+                    ui.provider_picker.set('Local AI')
+                    with mock.patch.object(ui.messagebox, 'showinfo') as unavailable:
+                        ui.change_ai_provider()
+                        unavailable.assert_called_once_with('Local AI', 'Not implemented yet.' if language == 'en'
+                                                            else 'Noch nicht implementiert.', parent=root)
+                    self.assertEqual(ui.provider_picker.get(), 'ChatGPT Secure MCP')
                     dialog = ui.connection_settings()
                     root.update()
                     if language == 'en':

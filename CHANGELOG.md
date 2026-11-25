@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.9.34 — Terminalziel und AI-Anbieter im Hauptfenster
+
+- Beide Seitenleisten öffnen ihre Einstellungen direkt unter dem Logo. Links stehen das Befehlsziel und im Terminalmodus der Ausgabebereich.
+- Der Terminaldialog speichert das finale Return für neue Befehle und den optionalen Start neuer Terminals im Home-Verzeichnis.
+- Beim Start einer Shell bindet ein kleiner Python-Prozess Bash direkt an das Pseudoterminal. Das verkürzt den Weg zum ersten Prompt auf langsamen Systemen.
+- Rechts ist ChatGPT Secure MCP als AI-Anbieter ausgewählt. Bei der Auswahl von Local AI erscheint „Noch nicht implementiert.“
+
 ## 0.9.33 — Gemeinsame Bridge-Verbindung und Standortwahl pro Dienst
 
 - Das Zahnrad unten links öffnet die Einrichtung oder Verwaltung der externen Bridge. Eine gespeicherte Kopplung bleibt auch offline sichtbar.

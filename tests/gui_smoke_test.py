@@ -46,12 +46,8 @@ class GUISmokeTests(unittest.TestCase):
                 self.assertEqual(core.output_mode, "CLIPBOARD")
                 self.assertEqual(ui.output_mode.get(), "Zwischenablage")
                 self.assertTrue(ui.terminal_button.winfo_ismapped())
-                ui.output_mode.set("Letzte 50")
-                ui.change_output_mode()
-                self.assertEqual(core.output_mode, "LAST_50")
-                ui.output_mode.set("Letzte 20")
-                ui.change_output_mode()
-                self.assertEqual(core.output_mode, "LAST_20")
+                self.assertTrue(ui.command_target_picker.instate(["disabled"]))
+                self.assertFalse(ui.output_picker.winfo_ismapped())
                 ui.open_terminal()
                 def until(predicate, timeout=8):
                     deadline = time.monotonic() + timeout
@@ -64,6 +60,17 @@ class GUISmokeTests(unittest.TestCase):
                 until(lambda: core.connection == "CONNECTED", timeout=20)
                 self.assertFalse(ui.terminal_button.winfo_ismapped())
                 self.assertIn("Terminal verbunden", ui.terminal_status.get())
+                self.assertEqual(ui.command_target.get(), "Terminal")
+                self.assertTrue(ui.output_picker.winfo_ismapped())
+                ui.command_target_picker.set("Zwischenablage")
+                ui.command_target_picker.event_generate("<<ComboboxSelected>>")
+                root.update()
+                self.assertEqual(core.output_mode, "CLIPBOARD")
+                self.assertFalse(ui.output_picker.winfo_ismapped())
+                ui.command_target_picker.set("Terminal")
+                ui.command_target_picker.event_generate("<<ComboboxSelected>>")
+                root.update()
+                self.assertEqual(core.output_mode, "SINCE_LAST")
                 ui.action(lambda: core.add_proposal("printf 'Hello Admin in the Loop\\n'"))
                 ui.from_ai_button.invoke()
                 root.update()
@@ -106,8 +113,7 @@ class GUISmokeTests(unittest.TestCase):
                 mcp(core.bridge_process, "submit_proposal", {"request_id": "GUI_SMOKE_REQUEST_0001", "text": "printf 'GUI_MCP\\n'"})
                 until(lambda: bool(core.inbox))
                 ui.from_ai_button.invoke()
-                until(lambda: core.review_state == "TAKE_PENDING")
-                root.update()
+                self.assertEqual(core.review_state, "TAKE_PENDING")
                 self.assertIn("Übernahme wird bestätigt", ui.review_status.get())
                 self.assertTrue(ui.approve_button.instate(["disabled"]))
                 until(lambda: core.review_state == "REVIEW")
@@ -266,9 +272,9 @@ class ConnectionDialogTests(unittest.TestCase):
             self.core.review_command("true", target="TERMINAL")
         self.ui.output_mode.set("Letzte 20")
         self.ui.change_output_mode()
-        self.assertTrue(self.ui.from_terminal_button.instate(["disabled"]))
-        self.ui.output_mode.set("Zwischenablage")
-        self.ui.change_output_mode()
+        self.assertEqual(self.core.output_mode, "CLIPBOARD")
+        self.assertFalse(self.ui.output_picker.winfo_ismapped())
+        self.assertTrue(self.ui.from_terminal_button.instate(["!disabled"]))
         self.ui.from_terminal_button.invoke()
         review = self.core.review
         self.core.disconnect_bridge()
@@ -382,9 +388,15 @@ class ConnectionDialogTests(unittest.TestCase):
             ys = [button.winfo_rooty() for button in
                   (self.ui.from_terminal_button, self.ui.approve_button, self.ui.from_ai_button)]
             self.assertLessEqual(max(ys) - min(ys), 1)
-            headers = [next(widget for widget in label.master.winfo_children()
-                            if widget.winfo_class() == "TButton") for label, _ in self.ui.status_labels]
-            self.assertLessEqual(abs(headers[0].winfo_rooty() - headers[1].winfo_rooty()), 1)
+            for first, second in ((self.ui.terminal_settings_button, self.ui.ai_settings_button),
+                                  (self.ui.command_target_picker, self.ui.provider_picker)):
+                self.assertLessEqual(abs(first.winfo_rooty() - second.winfo_rooty()), 1)
+            for section, settings, picker, status in (
+                    ("terminal", self.ui.terminal_settings_button, self.ui.command_target_picker, self.ui.status_labels[0][0]),
+                    ("ai", self.ui.ai_settings_button, self.ui.provider_picker, self.ui.status_labels[1][0])):
+                self.assertLess(self.ui.section_logo_labels[section].winfo_rooty(), settings.winfo_rooty())
+                self.assertLess(settings.winfo_rooty(), picker.winfo_rooty())
+                self.assertLess(picker.winfo_rooty(), status.winfo_rooty())
             self.assertGreater(int(self.ui.readiness.cget("wraplength")), widths[2] - 60)
             for section, panel in (("terminal", self.ui.panels[0]), ("ai", self.ui.panels[2])):
                 image = self.ui.section_images[section]
@@ -452,18 +464,71 @@ class ConnectionDialogTests(unittest.TestCase):
         self.assertEqual(self.callbacks, [])
 
     def test_centered_dropdowns_keep_selection_callbacks(self):
+        self.core.connection = "STARTING_SHELL"
+        self.core._event({"type": "ready", "session": "a" * 36})
+        self.ui.render()
+        self.root.update()
         self.assertEqual(str(self.ui.output_picker.cget("justify")), "center")
+        self.assertNotIn("Zwischenablage", self.ui.output_picker.cget("values"))
         self.ui.output_picker.set("Letzte 50")
         self.ui.output_picker.event_generate("<<ComboboxSelected>>")
         self.root.update()
         self.assertEqual(self.core.output_mode, "LAST_50")
-        picker = next(widget for widget in self.descendants(self.ui.panels[2])
-                      if isinstance(widget, ttk.Combobox))
+        picker = self.ui.block_size_picker
         self.assertEqual(str(picker.cget("justify")), "center")
         picker.set("LARGE")
         picker.event_generate("<<ComboboxSelected>>")
         self.root.update()
         self.assertEqual(self.core.preferences, "LARGE")
+        self.assertEqual(self.callbacks, [])
+
+    def test_local_ai_preview_preserves_mcp_connection_and_review(self):
+        self.core.connect_local_bridge()
+        self.until(lambda: self.core.chat_binding is not None)
+        worker, binding = self.core.bridge_worker, self.core.chat_binding
+        review = self.core.review_command("printf example")
+        picker = self.ui.provider_picker
+        self.assertEqual(tuple(picker.cget("values")), ("ChatGPT Secure MCP", "Local AI"))
+        self.assertEqual(picker.get(), "ChatGPT Secure MCP")
+        with mock.patch.object(self.ui.messagebox, "showinfo") as info:
+            picker.set("Local AI")
+            picker.event_generate("<<ComboboxSelected>>")
+            self.root.update()
+            info.assert_called_once_with("Local AI", "Noch nicht implementiert.", parent=self.root)
+            picker.event_generate("<<ComboboxSelected>>")
+            self.root.update()
+            self.assertEqual(info.call_count, 1)
+        self.assertEqual(picker.get(), "ChatGPT Secure MCP")
+        self.assertIs(self.core.bridge_worker, worker)
+        self.assertEqual(self.core.chat_binding, binding)
+        self.assertIs(self.core.review, review)
+        self.assertIsNone(self.ui.connection_dialog)
+        self.ui.ai_settings_button.invoke()
+        self.assertEqual(self.ui.connection_dialog.window.title(), "AI / MCP · Einrichtung & Einstellungen")
+
+    def test_terminal_settings_before_attach_and_during_a_review(self):
+        self.core.start_local(self.tmp.name)
+        self.ui.terminal_settings_button.invoke()
+        window = self.ui.terminal_dialog
+        self.assertIs(self.ui.terminal_settings(), window)
+        controls = {widget.cget("text"): widget for widget in self.descendants(window)
+                    if isinstance(widget, ttk.Checkbutton)}
+        home = controls["Neue Terminals im Home-Verzeichnis starten"]
+        enter = controls["Finales Return für neue Terminalbefehle"]
+        home.invoke()
+        self.assertEqual(self.core.endpoint.workdir, str(Path.home()))
+        self.core.connection = "STARTING_SHELL"
+        self.core._event({"type": "ready", "session": "a" * 36})
+        review = self.core.review_command("printf example")
+        enter.invoke()
+        self.assertFalse(self.core.final_return)
+        self.assertIs(review, self.core.review)
+        self.assertTrue(review.final_return)
+        home.invoke()
+        self.assertEqual(self.core.endpoint.workdir, str(Path.home()))
+        self.core._disconnect()
+        self.core.restart_local()
+        self.assertEqual(self.core.endpoint.workdir, self.tmp.name)
         self.assertEqual(self.callbacks, [])
 
     def test_one_window_contextual_sections_drafts_and_keyboard_scroll(self):
@@ -1437,8 +1502,8 @@ class StageConflictDialogTests(unittest.TestCase):
 
     def take(self):
         self.ui.from_ai_button.invoke()
-        self.until(lambda: self.core.review_state == "TAKE_PENDING")
-        self.root.update()
+        # invoke() renders the pending state. The next Tk tick may already consume the acknowledgement.
+        self.assertEqual(self.core.review_state, "TAKE_PENDING")
         self.assertIn("Übernahme wird bestätigt", self.ui.review_status.get())
         self.assertTrue(self.ui.approve_button.instate(["disabled"]))
         self.until(lambda: self.core.review_state == "REVIEW")
@@ -1464,9 +1529,9 @@ class StageConflictDialogTests(unittest.TestCase):
         self.submit("printf 'LOCAL_SOURCE\\n'", "GUI_CLIPBOARD_SOURCE_001")
         self.take()
         self.transfer()
-        self.ui.output_mode.set("Zwischenablage")
+        self.ui.command_target.set("Zwischenablage")
         with mock.patch.object(self.root, "clipboard_get", side_effect=AssertionError("early read")):
-            self.ui.change_output_mode()
+            self.ui.change_command_target()
             self.ui.render()
         self.root.clipboard_clear()
         self.root.clipboard_append("External clipboard snapshot\n")
@@ -1518,8 +1583,8 @@ class StageConflictDialogTests(unittest.TestCase):
         self.root.clipboard_clear()
         self.root.clipboard_append("UNCHANGED BEFORE APPROVAL")
         with mock.patch.object(self.core.channel, "send", side_effect=AssertionError("terminal write")) as send:
-            self.ui.output_mode.set("Zwischenablage")
-            self.ui.change_output_mode()
+            self.ui.command_target.set("Zwischenablage")
+            self.ui.change_command_target()
             self.assertEqual(self.core.review.command_target, "CLIPBOARD")
             self.assertEqual(self.ui.command_target.get(), "Zwischenablage")
             self.assertEqual(self.ui.approve_button.cget("text"), "In Zwischenablage kopieren")
@@ -1655,7 +1720,7 @@ class StageConflictDialogTests(unittest.TestCase):
         self.ui.from_ai_button.invoke()
         self.until(lambda: self.ui.conflict_dialog is not None and self.ui.conflict_dialog.winfo_exists())
         self.ui.conflict_buttons["LEAVE_RETURN_TAKE_PROPOSAL"].invoke()
-        self.until(lambda: self.core.review_state == "TAKE_PENDING")
+        self.assertEqual(self.core.review_state, "TAKE_PENDING")
         self.until(lambda: self.core.review_state == "REVIEW")
         self.assertEqual(self.core.review.direction, "TO_TERMINAL")
         self.assertIsNotNone(self.core.open_return)  # leaving is not waiving

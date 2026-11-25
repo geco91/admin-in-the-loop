@@ -46,7 +46,7 @@ from types import MappingProxyType
 # Single canonical UI/CLI version. The embedded bridge block keeps its own copy in
 # BRIDGE_SERVER_INFO; a consistency test pins both to the same value (Journal #88ff:
 # every delivered program state bumps at least the patch digit).
-APP_VERSION = "0.9.33"
+APP_VERSION = "0.9.34"
 
 
 if os.name == "posix":
@@ -162,6 +162,8 @@ if os.name == "posix":
     import termios
 
 PROMPT = b"AITL_P0$ "
+# Keep interactive history expansion off so Bash cannot rewrite a reviewed payload.
+BASH_INTERACTIVE_ARGS = ("--noprofile", "--norc", "-i", "+H")
 
 
 class OverrideRequired(ProbeError):
@@ -450,13 +452,16 @@ class PtySession:
             "HISTCONTROL": "ignoredups:ignorespace", "INPUTRC": "/dev/null",
         }
         try:
-            # Fresh helper process, never preexec_fn or fork from an active GUI.
+            # The child claims the controlling tty before exec. Keep this bootstrap
+            # independent of the size of the UI/bridge file on the prompt deadline.
             self.proc = subprocess.Popen(
-                [sys.executable, "-I", str(Path(__file__).resolve()),
-                 "--_shell-child", str(slave), str(bash)],
-                cwd=directory, env=child_env, close_fds=True, pass_fds=(slave,),
-                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                [sys.executable, "-I", "-S", "-c",
+                 "import fcntl, os, sys, termios\n"
+                 "fcntl.ioctl(0, termios.TIOCSCTTY, 0)\n"
+                 "os.execv(sys.argv[1], sys.argv[1:])",
+                 bash, *BASH_INTERACTIVE_ARGS],
+                cwd=directory, env=child_env, close_fds=True, start_new_session=True,
+                stdin=slave, stdout=slave, stderr=slave,
             )
         except BaseException:
             os.close(self.master)
@@ -598,10 +603,9 @@ def attach_terminal(fd):
 
 
 def shell_child(fd: int, bash: str) -> None:
-    """Internal trusted role. Attach controlling tty, then replace with Bash."""
+    """Accept the internal startup arguments of controllers already running during an update."""
     attach_terminal(fd)
-    # Recall is local editing; history expansion must never rewrite an approved payload.
-    os.execve(bash, [bash, "--noprofile", "--norc", "-i", "+H"], dict(os.environ))
+    os.execv(bash, [bash, *BASH_INTERACTIVE_ARGS])
 
 
 def expect_error(fn, code: str | None = None) -> None:
@@ -1548,6 +1552,7 @@ class AppSnapshot:
 
 
 COMMAND_TARGETS = {"TERMINAL": "Terminal", "CLIPBOARD": "Zwischenablage"}
+AI_PROVIDERS = ("ChatGPT Secure MCP", "Local AI")
 BLOCK_SIZES = ("SINGLE", "SMALL", "MEDIUM", "LARGE")
 OUTPUT_MODES = {
     "LAST_1": "Letzte Zeile",
@@ -1561,6 +1566,12 @@ OUTPUT_MODES = {
 # Authored UI text only: payloads, protocol identifiers and third-party output
 # never pass through this catalog. Kept inline for single-file installations.
 UI_ENGLISH = {
+    "Befehlsziel": "Command destination",
+    "AI-Anbieter": "AI provider",
+    "Terminal · Einrichtung & Einstellungen": "Terminal · Setup & Settings",
+    "Finales Return für neue Terminalbefehle": "Append a final Return to new terminal commands",
+    "Neue Terminals im Home-Verzeichnis starten": "Start new terminals in the home directory",
+    "Noch nicht implementiert.": "Not implemented yet.",
     "Externe Bridge einrichten": "Setup Remote Bridge",
     "Bridge-Verwaltung öffnen": "Open Bridge Management",
     "Externe Bridge": "Remote bridge",
@@ -2384,6 +2395,18 @@ class PreferenceStore:
                 value.pop("text_review_output", None)
             else:
                 value["text_review_" + direction] = enabled
+
+    def terminal_starts_in_home(self):
+        value = self._read("terminal-settings.json")
+        if value is None:
+            return False
+        require(type(value) is dict and set(value) == {"start_in_home"}
+                and type(value["start_in_home"]) is bool, "invalid_preferences")
+        return value["start_in_home"]
+
+    def save_terminal_home(self, enabled):
+        require(type(enabled) is bool, "invalid_preferences")
+        self._save({"start_in_home": enabled}, "terminal-settings.json")
 
     def save(self, final_return, block_size):
         require(type(final_return) is bool and block_size in BLOCK_SIZES, "invalid_preferences")
@@ -5830,8 +5853,11 @@ class AppCore:
         self.final_return = True
         self.command_target = "CLIPBOARD"
         self.preference_store = preference_store
+        self.terminal_home = False
+        self.terminal_start_directory = None
         if preference_store is not None:
             self.final_return, self.preferences = preference_store.load()
+            self.terminal_home = preference_store.terminal_starts_in_home()
         self.output_mode = "CLIPBOARD"
         self.last_transfer_offset = None
         self.approved_outputs = deque(maxlen=20)
@@ -6970,14 +6996,15 @@ class AppCore:
 
     def start_local(self, workdir):
         require(self.endpoint is None, "session_already_started")
-        self.endpoint = LocalEndpoint(workdir)
+        self.endpoint = LocalEndpoint(Path.home() if self.terminal_home else workdir)
+        self.terminal_start_directory = str(Path(workdir).resolve())
         self.last_error = None
         self.connection = "WAITING_FOR_TERMINAL"
         return str(self.endpoint.directory)
 
     def restart_local(self):
         require(self.connection == "DISCONNECTED", "terminal_not_disconnected")
-        workdir = self.endpoint.workdir if self.endpoint else os.getcwd()
+        workdir = self.terminal_start_directory or os.getcwd()
         if self.endpoint:
             self.endpoint.close()
             self.endpoint = None
@@ -6987,6 +7014,17 @@ class AppCore:
         self.output_mode = "CLIPBOARD"
         self.last_error = None
         return self.start_local(workdir)
+
+    def set_terminal_home(self, enabled):
+        require(type(enabled) is bool, "invalid_preferences")
+        workdir = str(Path.home()) if enabled else self.terminal_start_directory
+        if self.connection == "WAITING_FOR_TERMINAL":
+            require(workdir is not None and Path(workdir).is_dir(), "invalid_workdir")
+        if self.preference_store is not None:
+            self.preference_store.save_terminal_home(enabled)
+        self.terminal_home = enabled
+        if self.connection == "WAITING_FOR_TERMINAL":
+            self.endpoint.workdir = workdir
 
     def helper_argv(self):
         require(self.endpoint is not None, "no_endpoint")
@@ -7450,13 +7488,14 @@ class AppCore:
         if self.bridge_worker and self.bridge_state == "CONNECTED":
             self.bridge_worker.post("preferences", value)
 
-    def set_final_return(self, value):
+    def set_final_return(self, value, *, update_review=True):
         require(type(value) is bool, "invalid_return_preference")
-        require(self.review_state not in {"CHECKING", "TRANSFERRING", "TAKE_PENDING"}, "transfer_in_progress")
+        if update_review:
+            require(self.review_state not in {"CHECKING", "TRANSFERRING", "TAKE_PENDING"}, "transfer_in_progress")
         if self.preference_store:
             self.preference_store.save(value, self.preferences)
         self.final_return = value
-        if self.review and self.review.direction == "TO_TERMINAL" and self.review.command_target == "TERMINAL" \
+        if update_review and self.review and self.review.direction == "TO_TERMINAL" and self.review.command_target == "TERMINAL" \
                 and self.review_state in {"REVIEW", "OVERRIDE_REQUIRED"}:
             return self.edit_review(self.review.id, self.review.text, value)
 
@@ -9773,6 +9812,7 @@ class ReviewUI:
         self.last_binding_review = None
         self.binding_touched = False
         self.launcher = None
+        self.terminal_dialog = None
         self.connection_dialog = None
         self.risk_details_box = None
         self.risk_summary_box = None
@@ -9847,18 +9887,25 @@ class ReviewUI:
             panel.rowconfigure(1, weight=1)
 
         self.terminal_status = tk.StringVar(value=tr("Nicht verbunden\n"))
-        self.terminal_button = self.header(left, "Terminal", self.terminal_status, tr("Terminal öffnen"), self.open_terminal,
-                                           "terminal")
+        self.terminal_settings_button, self.command_target_picker = self.header(
+            left, "Terminal", self.terminal_status, self.terminal_settings, "terminal", tr("Befehlsziel"))
+        self.command_target = tk.StringVar(value=ui_labels(COMMAND_TARGETS)[core.command_target])
+        self.command_target_picker.configure(textvariable=self.command_target, values=tuple(ui_labels(COMMAND_TARGETS).values()))
+        self.command_target_picker.bind("<<ComboboxSelected>>", self.change_command_target)
         left_space = ttk.Frame(left)
         left_space.grid(row=1, column=0, sticky="nsew")
-        output_controls = ttk.Frame(left)
-        output_controls.grid(row=2, column=0, sticky="ew", pady=(12, 4))
-        output_controls.columnconfigure(0, weight=1)
-        ttk.Label(output_controls, text=tr("Ausgabebereich"), anchor="center", justify="center").grid(
-            row=0, column=0, sticky="ew", pady=(0, 5))
+        left_space.columnconfigure(0, weight=1)
+        self.terminal_button = ttk.Button(left_space, text=tr("Terminal öffnen"), command=self.open_terminal)
+        self.terminal_button.grid(row=0, column=0, sticky="ew")
+        self.output_controls = ttk.Frame(left_space)
+        self.output_controls.grid(row=1, column=0, sticky="ew")
+        self.output_controls.columnconfigure(0, weight=1)
+        ttk.Label(self.output_controls, text=tr("Ausgabebereich"), anchor="center", justify="center").grid(
+            row=0, column=0, sticky="ew", pady=(0, 2))
         self.output_mode = tk.StringVar(value=ui_labels(OUTPUT_MODES)[core.output_mode])
-        self.output_picker = ttk.Combobox(output_controls, textvariable=self.output_mode,
-                                          state="readonly", width=20, justify="center")
+        self.output_picker = ttk.Combobox(self.output_controls, textvariable=self.output_mode,
+            values=tuple(label for mode, label in ui_labels(OUTPUT_MODES).items() if mode != "CLIPBOARD"),
+            state="readonly", width=20, justify="center")
         self.output_picker.grid(row=1, column=0, sticky="ew")
         self.output_picker.bind("<<ComboboxSelected>>", self.change_output_mode)
 
@@ -9951,25 +9998,20 @@ class ReviewUI:
         self.review_status_label.grid(row=5, column=0, sticky="ew", pady=(8, 4))
 
         self.ai_status = tk.StringVar(value=tr("Nicht verbunden\nLokaler Testmodus"))
-        self.header(right, "AI / MCP", self.ai_status,
-                    tr("Einrichtung & Einstellungen"), self.connection_settings, "ai")
+        self.ai_settings_button, self.provider_picker = self.header(
+            right, "AI / MCP", self.ai_status, self.connection_settings, "ai", tr("AI-Anbieter"))
+        self.provider_picker.configure(values=AI_PROVIDERS)
+        self.provider_picker.current(0)
+        self.provider_picker.bind("<<ComboboxSelected>>", self.change_ai_provider)
         right_space = ttk.Frame(right)
         right_space.grid(row=1, column=0, sticky="nsew")
         ttk.Label(right_space, text=tr("Command-Blockgröße"), anchor="center", justify="center").pack(
             fill="x", pady=(5, 2))
         self.preference = tk.StringVar(value=core.preferences)
-        preference = ttk.Combobox(right_space, textvariable=self.preference,
-                                  values=BLOCK_SIZES, state="readonly", width=12, justify="center")
-        preference.pack(fill="x")
-        preference.bind("<<ComboboxSelected>>", lambda _: self.action(lambda: core.set_preferences(self.preference.get())))
-        ttk.Label(right_space, text=tr("Ziel für AI-Vorschläge"), anchor="center", justify="center").pack(fill="x", pady=(6, 2))
-        self.command_target = tk.StringVar(value=ui_labels(COMMAND_TARGETS)[core.command_target])
-        self.command_target_picker = ttk.Combobox(right_space, textvariable=self.command_target,
-            values=tuple(ui_labels(COMMAND_TARGETS).values()), state="readonly", justify="center")
-        self.command_target_picker.pack(fill="x")
-        self.command_target_picker.bind("<<ComboboxSelected>>", lambda _: self.action(
-            lambda: core.set_command_target(next(key for key, label in ui_labels(COMMAND_TARGETS).items()
-                                                if label == self.command_target.get()))))
+        self.block_size_picker = ttk.Combobox(right_space, textvariable=self.preference,
+                                               values=BLOCK_SIZES, state="readonly", width=12, justify="center")
+        self.block_size_picker.pack(fill="x")
+        self.block_size_picker.bind("<<ComboboxSelected>>", lambda _: self.action(lambda: core.set_preferences(self.preference.get())))
         ttk.Separator(right_space, orient="horizontal").pack(fill="x", pady=(6, 6))
         ttk.Label(right_space, text=tr("Chat-Code"), anchor="center", justify="center",
                   font=("TkDefaultFont", 10, "bold")).pack(fill="x", pady=(0, 4))
@@ -10043,7 +10085,7 @@ class ReviewUI:
         self.messagebox.showinfo(tr("Sprache / Language"),
             tr("Sprache gespeichert. Die Änderung gilt nach dem nächsten App-Start."), parent=self.root)
 
-    def header(self, panel, title, status, button_text, command, section):
+    def header(self, panel, title, status, settings_command, section, selector_label):
         frame = self.ttk.Frame(panel)
         frame.grid(row=0, column=0, sticky="ew")
         frame.columnconfigure(0, weight=1)
@@ -10058,13 +10100,17 @@ class ReviewUI:
             graphic.grid(row=0, column=0, pady=(0, 4))
             self.section_logo_labels[section] = graphic
         self.ttk.Label(frame, text=title, font=("TkDefaultFont", 11, "bold"),
-                       anchor="center", justify="center").grid(row=1, column=0, sticky="ew", pady=(0, 8))
+                       anchor="center", justify="center").grid(row=1, column=0, sticky="ew", pady=(0, 4))
+        button = self.ttk.Button(frame, text=tr("Einrichtung & Einstellungen"), command=settings_command)
+        button.grid(row=2, column=0, sticky="ew")
+        self.ttk.Label(frame, text=selector_label, anchor="center", justify="center").grid(
+            row=3, column=0, sticky="ew", pady=(5, 2))
+        picker = self.ttk.Combobox(frame, state="readonly", width=18, justify="center")
+        picker.grid(row=4, column=0, sticky="ew")
         label = self.ttk.Label(frame, textvariable=status, anchor="center", justify="center", wraplength=180)
-        label.grid(row=2, column=0, sticky="ew", pady=(0, 10))
+        label.grid(row=5, column=0, sticky="ew", pady=4)
         self.status_labels.append((label, panel))
-        button = self.ttk.Button(frame, text=button_text, command=command)
-        button.grid(row=3, column=0, sticky="ew")
-        return button
+        return button, picker
 
     def fit_panels(self, _event=None):
         for label, panel in self.status_labels:
@@ -10076,7 +10122,7 @@ class ReviewUI:
         self.risk_hint_label.configure(wraplength=risk_width)
         status_height = max(label.winfo_reqheight() for label, _ in self.status_labels)
         for label, _ in self.status_labels:
-            label.master.rowconfigure(2, minsize=status_height + 10)
+            label.master.rowconfigure(5, minsize=status_height + 8)
 
     def action(self, fn):
         try:
@@ -10109,6 +10155,39 @@ class ReviewUI:
         box.frame.pack(fill="both", expand=True)
         box.show(((self.core.helper_command(), "plain"),))
 
+    def terminal_settings(self):
+        if self.terminal_dialog is not None and self.terminal_dialog.winfo_exists():
+            self.terminal_dialog.lift()
+            return self.terminal_dialog
+        window = self.terminal_dialog = self.tk.Toplevel(self.root)
+        window.title(tr("Terminal · Einrichtung & Einstellungen"))
+        window.transient(self.root)
+        body = self.ttk.Frame(window, padding=12)
+        body.pack(fill="both", expand=True)
+        self.terminal_default_return = self.tk.BooleanVar(window, value=self.core.final_return)
+        self.terminal_home = self.tk.BooleanVar(window, value=self.core.terminal_home)
+        self.ttk.Checkbutton(body, text=tr("Finales Return für neue Terminalbefehle"),
+            variable=self.terminal_default_return, command=lambda: self.action(
+                lambda: self.core.set_final_return(self.terminal_default_return.get(), update_review=False))).pack(anchor="w")
+        self.ttk.Checkbutton(body, text=tr("Neue Terminals im Home-Verzeichnis starten"),
+            variable=self.terminal_home, command=lambda: self.action(
+                lambda: self.core.set_terminal_home(self.terminal_home.get()))).pack(anchor="w", pady=(4, 0))
+        self.ttk.Button(body, text=tr("Schließen"), command=window.destroy).pack(anchor="e", pady=(12, 0))
+        window.bind("<Escape>", lambda _: window.destroy())
+        return window
+
+    def change_command_target(self, _event=None):
+        if self.core.connection != "CONNECTED" or self.command_target_picker.instate(["disabled"]):
+            self.render()
+            return
+        target = next(key for key, label in ui_labels(COMMAND_TARGETS).items() if label == self.command_target.get())
+        self.action(lambda: self.core.set_command_target(target))
+
+    def change_ai_provider(self, _event=None):
+        if self.provider_picker.get() == "Local AI":
+            self.provider_picker.current(0)
+            self.messagebox.showinfo("Local AI", tr("Noch nicht implementiert."), parent=self.root)
+
     def connection_settings(self):
         if self.connection_dialog and self.connection_dialog.window.winfo_exists():
             self.connection_dialog.window.lift()
@@ -10137,6 +10216,9 @@ class ReviewUI:
             dialog.run("bridge", dialog.show_binding)
 
     def change_output_mode(self, _event=None):
+        if self.core.connection != "CONNECTED" or self.core.command_target != "TERMINAL":
+            self.render()
+            return
         selected = self.output_mode.get()
         self.action(lambda: self.core.set_output_mode(next(key for key, label in ui_labels(OUTPUT_MODES).items() if label == selected)))
 
@@ -11163,8 +11245,7 @@ class ReviewUI:
                        else self.core.command_target)
         command_ready = connected or next_target == "CLIPBOARD"
         self.command_target.set(ui_labels(COMMAND_TARGETS)[self.core.command_target])
-        self.command_target_picker.configure(state="readonly" if snapshot.review_state in self.core.STAGE_FREE
-                                              and self.core.pending_take is None else "disabled")
+        self.command_target_picker.configure(state="readonly" if connected and not busy else "disabled")
         can_review = command_ready and not busy and (ready or parked) and not proposal_review_active
         self.from_ai_button.configure(state="normal" if can_review else "disabled")
         proposal_status = tr("Command-Vorschlag vorhanden") if ready else (
@@ -11188,11 +11269,17 @@ class ReviewUI:
         self.readiness.configure(text=proposal_status,
                                  background="#ffcc99" if waiting_for_review else "#dcefe1" if can_review else "#f6e4d0",
                                  foreground="#713800" if waiting_for_review else "#285739" if can_review else "#75451b")
-        self.output_picker.configure(values=tuple(ui_labels(OUTPUT_MODES).values()),
-                                     state="disabled" if busy else "readonly")
+        if connected and snapshot.output_mode != "CLIPBOARD":
+            self.output_controls.grid()
+        else:
+            self.output_controls.grid_remove()
+        self.output_picker.configure(state="disabled" if busy else "readonly")
         self.output_mode.set(ui_labels(OUTPUT_MODES)[snapshot.output_mode])
         self.preference.set(snapshot.preferences)
         self.final_return.set(snapshot.final_return)
+        if self.terminal_dialog is not None and self.terminal_dialog.winfo_exists():
+            self.terminal_default_return.set(snapshot.final_return)
+            self.terminal_home.set(self.core.terminal_home)
         review = snapshot.review
         self.normalization.set(normalization_summary(review) if review else "")
         command = review is not None and review.direction == "TO_TERMINAL"
@@ -11836,7 +11923,7 @@ BRIDGE_RETENTION = 24 * 3600
 BRIDGE_OUTPUT_LIMIT = 64 * 1024
 BRIDGE_BLOCK_SIZES = ("SINGLE", "SMALL", "MEDIUM", "LARGE")
 BRIDGE_VERSIONS = ("2026-07-28", "2025-11-25", "2025-06-18", "2025-03-26")
-BRIDGE_SERVER_INFO = {"name": "admin-in-the-loop", "version": "0.9.33"}
+BRIDGE_SERVER_INFO = {"name": "admin-in-the-loop", "version": "0.9.34"}
 BRIDGE_BASE32 = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 # M9 Folgeaenderung (Operator-Journal 100): pairing-code validity 10 minutes; the
 # attempt limit (5), claim-path cooldown and the separate PAIR_PENDING token lifetime

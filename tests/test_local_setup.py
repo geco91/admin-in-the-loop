@@ -464,7 +464,7 @@ class AppVersionConsistencyTests(unittest.TestCase):
     muessen identisch sein; --version existiert im Haupt-Parser."""
 
     def test_version_sources_pinned(self):
-        self.assertEqual(a.APP_VERSION, "0.9.33")
+        self.assertEqual(a.APP_VERSION, "0.9.34")
         self.assertEqual(a.BRIDGE_SERVER_INFO["name"], "admin-in-the-loop")
         self.assertEqual(a.BRIDGE_SERVER_INFO["version"], a.APP_VERSION)
 
@@ -661,6 +661,34 @@ class ApplicationUpdateTests(unittest.TestCase):
             response.read.assert_called_once_with(a.APP_UPDATE_LIMIT+1)
             with self.assertRaisesRegex(a.ProbeError, "update_redirect"):
                 build.call_args.args[0].redirect_request(None, None, 302, "", {}, "http://other/")
+
+
+class TerminalSettingsTests(unittest.TestCase):
+    def test_start_directory_and_return_survive_restart_and_stable_preferences(self):
+        with tempfile.TemporaryDirectory() as directory:
+            prefs = a.PreferenceStore(Path(directory, "config"))
+            prefs.save(True, "SMALL")
+            original = (prefs.directory / "preferences.json").read_bytes()
+            with mock.patch.object(Path, "home", return_value=Path(directory)):
+                core = a.AppCore(prefs)
+                try:
+                    core.start_local(prefs.directory)
+                    self.assertEqual(core.endpoint.workdir, str(prefs.directory))
+                    core.set_terminal_home(True)
+                    self.assertEqual(core.endpoint.workdir, directory)
+                    self.assertEqual((prefs.directory / "preferences.json").read_bytes(), original)
+                    core.set_final_return(False, update_review=False)
+                finally:
+                    core.close()
+                restored = a.AppCore(a.PreferenceStore(prefs.directory))
+                try:
+                    self.assertFalse(restored.final_return)
+                    restored.start_local(prefs.directory)
+                    self.assertEqual(restored.endpoint.workdir, directory)
+                    restored.set_terminal_home(False)
+                    self.assertEqual(restored.endpoint.workdir, str(prefs.directory))
+                finally:
+                    restored.close()
 
 
 class TerminalHistoryTests(unittest.TestCase):

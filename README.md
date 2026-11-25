@@ -16,7 +16,15 @@ weitergegeben. Das Terminal bleibt unabhängig manuell bedienbar.
 
 ## Aktuelle persönliche Testversion
 
-Auf dem Testbranch **0.9.33** richtet das Zahnrad unten links im Hauptfenster
+Auf dem Testbranch **0.9.34** steht unter den Logos von **Terminal** und **AI / MCP**
+jeweils **Einrichtung & Einstellungen**. Links wählst du das Befehlsziel,
+rechts den AI-Anbieter. **ChatGPT Secure MCP** ist verfügbar. **Local AI**
+zeigt zunächst „Noch nicht implementiert.“ und kehrt zur aktiven Auswahl zurück.
+Der Terminaldialog speichert das finale Return für neue Befehle und den
+optionalen Start neuer Terminals im Home-Verzeichnis. Standardmäßig startet
+die Shell im Startverzeichnis der Anwendung. [Vorschau mit Zwischenablage](doc/assets/review-sides/arbeitsplatz.png) · [Vorschau mit verbundenem Terminal](doc/assets/review-sides/terminalmodus.png)
+
+Das Zahnrad unten links im Hauptfenster
 die externe Bridge ein. Bei gespeicherter Kopplung zeigt es **Bridge-Verwaltung
 öffnen** und den Verbindungsstatus. Unter **Befehlsprüfung → sh-guard →
 Einstellungen** und **AI / MCP → Einrichtung & Einstellungen** wählst du den
@@ -66,12 +74,11 @@ als Standard für neue Vorgänge gewählt. Bei Terminaltrennung gilt wieder
 Zwischenablage. Eine laufende Kopierprüfung wird beim Öffnen der Shell nicht
 automatisch zur Terminalfreigabe.
 
-**Ausgabebereich → Zwischenablage** und das Ziel für AI-Vorschläge sind gekoppelt.
-Diese Auswahl gilt deshalb auch bei geöffnetem Terminal: AI-Vorschläge werden
-nur mit **In Zwischenablage kopieren** übernommen und nicht ins Terminal gesendet.
-Ein Wechsel bei offenem Command erzeugt einen neuen Review; alte Freigaben gelten
-nicht mehr. Während Übernahme oder Zustellung ist die Moduswahl gesperrt.
-Zeilenbereiche bzw. **Letzter Command** schalten zurück zum Terminalmodus.
+Über **Befehlsziel → Zwischenablage** kannst du bei geöffnetem Terminal zum
+Kopieren wechseln. Ein freigegebener AI-Vorschlag wird dann in die Zwischenablage
+kopiert. Wählst du wieder **Terminal**, erscheint darunter der **Ausgabebereich**
+für die Rückgabeprüfung. Ein Wechsel des Ziels bei offenem Command erzeugt eine
+neue Prüffassung. Während Übernahme oder Zustellung ist die Moduswahl gesperrt.
 
 Links liest **Prüfen →** den aktuellen Zwischenablagetext zur Rückgabe an die AI.
 Erst nach Prüfung und ausdrücklicher Freigabe wird er geteilt. Die Rückgabe ist
