@@ -37,6 +37,7 @@ import tempfile
 import time
 import unicodedata
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
@@ -45,7 +46,7 @@ from types import MappingProxyType
 # Single canonical UI/CLI version. The embedded bridge block keeps its own copy in
 # BRIDGE_SERVER_INFO; a consistency test pins both to the same value (Journal #88ff:
 # every delivered program state bumps at least the patch digit).
-APP_VERSION = "0.9.31"
+APP_VERSION = "0.9.32"
 
 
 if os.name == "posix":
@@ -258,8 +259,9 @@ def update_application(owner=APP_UPDATE_OWNER, branch="main", target=None, *, al
         print("Updatequelle: " + app_update_url(owner, branch), flush=True)
         candidate = download_app_update(owner, branch)
         new_version = app_update_version(candidate)
-        require(allow_downgrade or tuple(map(int, new_version.split("."))) >=
-                tuple(map(int, old_version.split("."))), "update_downgrade")
+        old_number = tuple(map(int, old_version.split(".")))
+        new_number = tuple(map(int, new_version.split(".")))
+        require(allow_downgrade or new_number >= old_number, "update_downgrade")
         require(fingerprint(target.lstat()) == fingerprint(info), "update_target_changed")
         if candidate == original:
             print("Bereits aktuell: " + old_version)
@@ -275,6 +277,14 @@ def update_application(owner=APP_UPDATE_OWNER, branch="main", target=None, *, al
                 destination.flush()
                 os.fsync(destination.fileno())
         require(fingerprint(target.lstat()) == fingerprint(info), "update_target_changed")
+        if new_number < (0, 9, 31) <= old_number:
+            # Also covers 0.9.31 -> fixed branch -> main with no intervening GUI start.
+            preferences = PreferenceStore(preference_directory())
+            try:
+                if (preferences.directory / "preferences.json").exists():
+                    preferences.load()
+            except (OSError, ProbeError) as exc:
+                raise ProbeError("update_preferences") from exc
         os.replace(staged[0], backup)
         os.replace(staged[1], target)
         print("Aktualisiert: " + old_version + " → " + new_version)
@@ -2227,93 +2237,125 @@ class PreferenceStore:
     def _directory_fd(self):
         return private_directory_fd(self.directory)
 
-    def _load(self):
+    def _read(self, name):
         directory_fd = None
         try:
             directory_fd = self._directory_fd()
             try:
-                fd = os.open("preferences.json", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd)
+                fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd)
             except FileNotFoundError:
-                return {"version": 1, "final_return": True, "block_size": "SMALL"}
+                return None
             with os.fdopen(fd, "rb") as source:
                 info = os.fstat(source.fileno())
                 require(stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid()
                         and stat.S_IMODE(info.st_mode) == 0o600, "unsafe_preferences_file")
                 raw = source.read(4097)
             require(len(raw) <= 4096, "preferences_limit")
-            value = decode_packet(raw)
-            required = {"version", "final_return", "block_size"}
-            require(type(value) is dict and required <= set(value)
-                    and set(value) <= required | {"language", "command_risk", "command_risk_host", "text_review", "text_review_command", "text_review_output"}, "invalid_preferences")
-            require(type(value["version"]) is int and value["version"] == 1, "preferences_version")
-            require(type(value["final_return"]) is bool and value["block_size"] in BLOCK_SIZES,
-                    "invalid_preferences")
-            require("command_risk" not in value or type(value["command_risk"]) is bool,
-                    "invalid_preferences")
-            host = value.get("command_risk_host", "local")
-            require(type(host) is str and (host == "local" or re.fullmatch("[0-9a-f]{64}", host)), "invalid_preferences")
-            for key in ("text_review", "text_review_command", "text_review_output"):
-                require(key not in value or type(value[key]) is bool, "invalid_preferences")
-            require(type(value.get("language", "system")) is str
-                    and value.get("language", "system") in {"system", "de", "en"}, "invalid_preferences")
-            return value
+            return decode_packet(raw)
         except OSError:
             raise ProbeError("preferences_read_failure") from None
         finally:
             if directory_fd is not None:
                 os.close(directory_fd)
 
+    @contextmanager
+    def _settings(self, *, write=False):
+        directory_fd = self._directory_fd()
+        try:
+            fcntl.flock(directory_fd, fcntl.LOCK_EX)
+            value = self._read("preferences.json")
+            missing = value is None
+            if missing:
+                value = {"version": 1, "final_return": True, "block_size": "SMALL", "command_risk": False}
+            required = {"version", "final_return", "block_size"}
+            require(type(value) is dict and required <= set(value)
+                    and set(value) <= required | {"language", "command_risk", "command_risk_host", "text_review", "text_review_command", "text_review_output"}, "invalid_preferences")
+            require(type(value["version"]) is int and value["version"] == 1, "preferences_version")
+            require(type(value["final_return"]) is bool and value["block_size"] in BLOCK_SIZES, "invalid_preferences")
+            for key in ("command_risk", "text_review", "text_review_command", "text_review_output"):
+                require(key not in value or type(value[key]) is bool, "invalid_preferences")
+            require(type(value.get("language", "system")) is str
+                    and value.get("language", "system") in {"system", "de", "en"}, "invalid_preferences")
+            previous = value.copy()
+            if "command_risk_host" in value:  # First published bridge build (0.9.31).
+                self._set_recipient(value, value.get("command_risk", False), value.pop("command_risk_host"))
+            yield value
+            if previous != value or (write and missing):
+                self._save(value)
+            if (write or "command_risk_host" in previous) and "command_risk" in value:
+                # The stable local on/off switch takes precedence, including edits made on main.
+                try:
+                    os.unlink("bridge-review.json", dir_fd=directory_fd)
+                    os.fsync(directory_fd)
+                except FileNotFoundError:
+                    pass
+        except OSError:
+            raise ProbeError("preferences_write_failure") from None
+        finally:
+            os.close(directory_fd)
+
     def load(self):
-        value = self._load()
-        return value["final_return"], value["block_size"]
+        with self._settings() as value:
+            return value["final_return"], value["block_size"]
 
     def load_language(self):
-        return self._load().get("language", "system")
+        with self._settings() as value:
+            return value.get("language", "system")
 
     def save_language(self, language):
         require(type(language) is str and language in {"system", "de", "en"}, "invalid_preferences")
-        value = self._load()
-        value["language"] = language
-        self._save(value)
+        with self._settings(write=True) as value:
+            value["language"] = language
 
     def load_command_risk(self):
         return self.command_risk_recipient() is not None
 
     def command_risk_recipient(self):
-        value = self._load()
-        return value.get("command_risk_host", "local") if value.get("command_risk") else None
+        with self._settings() as value:
+            if "command_risk" in value:
+                return "local" if value["command_risk"] else None
+            remote = self._read("bridge-review.json")
+            if remote is None:
+                return None
+            require(set(remote) == {"recipient"} and type(remote["recipient"]) is str
+                    and re.fullmatch("[0-9a-f]{64}", remote["recipient"]), "invalid_preferences")
+            return remote["recipient"]
 
-    def save_command_risk(self, enabled, host="local"):
+    def _set_recipient(self, value, enabled, host):
         require(type(enabled) is bool and type(host) is str and (host == "local" or re.fullmatch("[0-9a-f]{64}", host)),
                 "invalid_preferences")
-        value = self._load()
-        value["command_risk_host"] = host
-        value["command_risk"] = enabled
-        self._save(value)
+        if enabled and host != "local":
+            # Publish the recipient first. Stable reads an absent local opt-in as off.
+            self._save({"recipient": host}, "bridge-review.json")
+            value.pop("command_risk", None)
+        else:
+            value["command_risk"] = enabled
+
+    def save_command_risk(self, enabled, host="local"):
+        with self._settings(write=True) as value:
+            self._set_recipient(value, enabled, host)
 
     def load_text_review(self, direction="command"):
         require(direction in {"command", "output"}, "invalid_preferences")
-        value = self._load()
-        return value.get("text_review_" + direction, value.get("text_review", False))
+        with self._settings() as value:
+            return value.get("text_review_" + direction, value.get("text_review", False))
 
     def save_text_review(self, enabled, direction=None):
         require(type(enabled) is bool and direction in {None, "command", "output"}, "invalid_preferences")
-        value = self._load()
-        if direction is None:  # Legacy global setting, readable as the default for both directions.
-            value["text_review"] = enabled
-            value.pop("text_review_command", None)
-            value.pop("text_review_output", None)
-        else:
-            value["text_review_" + direction] = enabled
-        self._save(value)
+        with self._settings(write=True) as value:
+            if direction is None:  # Legacy global setting, readable as the default for both directions.
+                value["text_review"] = enabled
+                value.pop("text_review_command", None)
+                value.pop("text_review_output", None)
+            else:
+                value["text_review_" + direction] = enabled
 
     def save(self, final_return, block_size):
         require(type(final_return) is bool and block_size in BLOCK_SIZES, "invalid_preferences")
-        value = self._load()  # Preserve the opt-in; reject unsafe/malformed files.
-        value.update(final_return=final_return, block_size=block_size)
-        self._save(value)
+        with self._settings(write=True) as value:
+            value.update(final_return=final_return, block_size=block_size)
 
-    def _save(self, value):
+    def _save(self, value, name="preferences.json"):
         directory_fd = None
         temporary = ".preferences-" + uuid.uuid4().hex
         try:
@@ -2324,7 +2366,8 @@ class PreferenceStore:
                 target.write(json.dumps(value, ensure_ascii=True).encode("ascii"))
                 target.flush()
                 os.fsync(target.fileno())
-            os.replace(temporary, "preferences.json", src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+            os.replace(temporary, name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+            os.fsync(directory_fd)
         except OSError:
             raise ProbeError("preferences_write_failure") from None
         finally:
@@ -11448,7 +11491,7 @@ BRIDGE_RETENTION = 24 * 3600
 BRIDGE_OUTPUT_LIMIT = 64 * 1024
 BRIDGE_BLOCK_SIZES = ("SINGLE", "SMALL", "MEDIUM", "LARGE")
 BRIDGE_VERSIONS = ("2026-07-28", "2025-11-25", "2025-06-18", "2025-03-26")
-BRIDGE_SERVER_INFO = {"name": "admin-in-the-loop", "version": "0.9.31"}
+BRIDGE_SERVER_INFO = {"name": "admin-in-the-loop", "version": "0.9.32"}
 BRIDGE_BASE32 = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 # M9 Folgeaenderung (Operator-Journal 100): pairing-code validity 10 minutes; the
 # attempt limit (5), claim-path cooldown and the separate PAIR_PENDING token lifetime
@@ -14544,6 +14587,7 @@ def main():
                    "update_source": "Download ist keine syntaktisch gültige, passende AITL-Anwendungsdatei.",
                    "update_size": "Anwendungsdatei leer oder zu groß.",
                    "update_downgrade": "Die Quelle ist älter. Datei unverändert. Für einen bewussten Versionswechsel den Branch ausdrücklich angeben.",
+                   "update_preferences": "Die Einstellungen konnten für diese Version nicht vorbereitet werden. Rechte und Inhalt von preferences.json prüfen.",
                    "update_target": "Updateziel ist keine reguläre Datei.",
                    "update_target_changed": "Die lokale Datei wurde während des Updates verändert. Bitte erneut starten.",
                    "update_backup": "Sicherungsziel ist keine reguläre Datei.",

@@ -48,10 +48,40 @@ class PreferenceTests(unittest.TestCase):
         self.assertTrue(self.store.load_command_risk())
         self.assertEqual(self.store.load(), (True, "MEDIUM"))
         value = json.loads((self.base / "preferences.json").read_text())
-        self.assertEqual(set(value), {"version", "final_return", "block_size", "command_risk", "command_risk_host"})
+        self.assertEqual(set(value), {"version", "final_return", "block_size", "command_risk"})
         self.assertEqual((self.base / "preferences.json").stat().st_mode & 0o777, 0o600)
         self.store.save_command_risk(False)
         self.assertFalse(self.store.load_command_risk())
+
+    def test_remote_consent_survives_stable_settings_and_respects_stable_local_choice(self):
+        recipient = "a1" * 32
+        self.store.save_command_risk(True, recipient)
+        path = self.base / "preferences.json"
+        stable = json.loads(path.read_bytes())
+        self.assertNotIn("command_risk_host", stable)
+        self.assertFalse(stable.get("command_risk", False))
+        self.assertEqual((self.base / "bridge-review.json").stat().st_mode & 0o777, 0o600)
+        stable["language"] = "en"
+        path.write_text(json.dumps(stable))
+        self.assertEqual(self.store.command_risk_recipient(), recipient)
+        for enabled in (True, False):
+            stable["command_risk"] = enabled
+            path.write_text(json.dumps(stable))
+            self.assertEqual(self.store.command_risk_recipient(), "local" if enabled else None)
+        self.store.save_command_risk(False)
+        self.assertFalse((self.base / "bridge-review.json").exists())
+
+    def test_legacy_local_and_disabled_recipient_migrate_without_enabling_remote(self):
+        self.store.save(False, "MEDIUM")
+        path = self.base / "preferences.json"
+        for enabled, host in ((True, "local"), (False, "a1" * 32)):
+            with self.subTest(enabled=enabled, host=host):
+                current = dict(json.loads(path.read_bytes()), command_risk=enabled, command_risk_host=host)
+                path.write_text(json.dumps(current))
+                self.assertEqual(self.store.command_risk_recipient(), "local" if enabled else None)
+                current.pop("command_risk_host")
+                self.assertEqual(json.loads(path.read_bytes()), current)
+                self.assertFalse((self.base / "bridge-review.json").exists())
 
     def test_text_review_selection_is_persisted_without_changing_other_options(self):
         self.store.save(False, "SINGLE")

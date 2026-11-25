@@ -16,7 +16,7 @@ weitergegeben. Das Terminal bleibt unabhängig manuell bedienbar.
 
 ## Aktuelle persönliche Testversion
 
-Der Arbeitsstand **0.9.31** verwaltet sh-guard am Standort der Bridge. Unter
+Der Testbranch **0.9.32** verwaltet sh-guard am Standort der Bridge. Unter
 **Befehlsprüfung → sh-guard → Einstellungen** steht das Installationsziel. Die
 gleiche Verwaltung öffnet sich im Ziel-Qube mit
 `python3 admin_in_the_loop.py --bridge --gui`. Das Hauptprogramm verwendet
@@ -121,6 +121,9 @@ python3 admin_in_the_loop.py update geco91
 
 # Ausdrücklich einen Entwicklungsbranch dieses Forks ausprobieren
 python3 admin_in_the_loop.py update geco91 feature/mein-branch
+
+# Vom Testbranch zur aktuellen stabilen Version im Fork zurückkehren
+python3 admin_in_the_loop.py update geco91 main
 ```
 
 `--update` funktioniert genauso wie `update`. Ohne Nutzernamen gilt immer
@@ -128,13 +131,15 @@ python3 admin_in_the_loop.py update geco91 feature/mein-branch
 `main`. Die Quelle wird nicht dauerhaft umgestellt: Für weitere Updates aus
 einem Fork dessen Namen wieder angeben. Der Entwicklungsbranch muss existieren.
 
-Das Update prüft Python-Syntax sowie übereinstimmende App-/Bridge-Versionen,
-führt den Download dabei nicht aus und ersetzt nur die Anwendungsdatei atomar.
-`admin_in_the_loop.py.bak` enthält die unmittelbar vorherige Datei. Gleicher
-Dateiinhalt wird nicht erneut geschrieben. Einstellungen, Verbindungen und
-installierte Prüftools werden nicht überschrieben. App und gegebenenfalls eine
-separat laufende Bridge anschließend neu starten; diese werden nicht automatisch
-beendet oder aktualisiert. Bei getrennten Qubes die jeweilige Kopie aktualisieren.
+Das Update prüft Python-Syntax und übereinstimmende App-/Bridge-Versionen und
+ersetzt die Anwendungsdatei atomar. `admin_in_the_loop.py.bak` enthält die
+unmittelbar vorherige Datei. Beim Wechsel von **0.9.31** zunächst einmal
+`python3 admin_in_the_loop.py update geco91 feat/bridge-sh-guard` ausführen.
+Ab **0.9.32** bereitet der Updater auch die in 0.9.31 gespeicherten
+sh-guard-Einstellungen für den Rückweg vor. Die Remote-Aktivierung bleibt an
+ihre Bridge gebunden. Version 0.9.30 liest weiterhin ihre lokale Einstellung.
+Bei getrennten Qubes beide Kopien aktualisieren und die jeweiligen Prozesse
+neu starten. In 0.9.30 startet die separate Bridge im Konsolenmodus mit `--bridge`.
 
 Ohne ausdrücklich angegebenen Branch wird eine ältere Versionsnummer abgelehnt.
 Das Original kann hinter dem Fork liegen. Mit beiden Parametern ist auch ein

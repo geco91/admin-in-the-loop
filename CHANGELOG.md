@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.9.32 — Rückwechsel vom Bridge-Testbranch zu main
+
+- `update geco91 main` unterstützt den Rückwechsel zu 0.9.30 auch mit einer in
+  0.9.31 gespeicherten sh-guard-Aktivierung. Der Empfänger einer Remote-Freigabe
+  wird separat gespeichert. Die stabile Version kann die gemeinsamen Einstellungen
+  lesen und bearbeiten, beim späteren Wechsel auf den Testbranch gilt weiterhin
+  die Freigabe für denselben Empfänger.
+
 ## 0.9.31 — sh-guard auf der Bridge
 
 - Eine lokale oder gekoppelte Bridge lädt, prüft und installiert sh-guard und
